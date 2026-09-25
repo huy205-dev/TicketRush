@@ -7,7 +7,45 @@ package outboxdb
 
 import (
 	"context"
+
+	"time"
 )
+
+const countUnpublished = `-- name: CountUnpublished :one
+SELECT count(*) FROM outbox WHERE published_at IS NULL
+`
+
+func (q *Queries) CountUnpublished(ctx context.Context) (int64, error) {
+	row := q.db.QueryRow(ctx, countUnpublished)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const deletePublishedBefore = `-- name: DeletePublishedBefore :execrows
+DELETE FROM outbox
+WHERE id IN (
+  SELECT id
+  FROM outbox
+  WHERE published_at < now() - $1::interval
+  ORDER BY id
+  LIMIT $2::int
+)
+`
+
+type DeletePublishedBeforeParams struct {
+	Retention time.Duration
+	BatchSize int32
+}
+
+// Removes at most batch_size messages published longer ago than retention.
+func (q *Queries) DeletePublishedBefore(ctx context.Context, arg DeletePublishedBeforeParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deletePublishedBefore, arg.Retention, arg.BatchSize)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
 
 const insertMessage = `-- name: InsertMessage :one
 INSERT INTO outbox (id, topic, msg_key, event_type, payload)
@@ -44,4 +82,60 @@ func (q *Queries) InsertMessage(ctx context.Context, arg InsertMessageParams) (i
 	var id int64
 	err := row.Scan(&id)
 	return id, err
+}
+
+const lockUnpublished = `-- name: LockUnpublished :many
+SELECT id, topic, msg_key, event_type, payload
+FROM outbox
+WHERE published_at IS NULL
+ORDER BY id
+LIMIT $1::int
+FOR UPDATE SKIP LOCKED
+`
+
+type LockUnpublishedRow struct {
+	ID        int64
+	Topic     string
+	MsgKey    string
+	EventType string
+	Payload   []byte
+}
+
+// Oldest unpublished messages, locked until the relay commits. SKIP LOCKED
+// lets a second relay take the next batch instead of waiting (SPEC.md 9.5).
+func (q *Queries) LockUnpublished(ctx context.Context, batchSize int32) ([]LockUnpublishedRow, error) {
+	rows, err := q.db.Query(ctx, lockUnpublished, batchSize)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []LockUnpublishedRow
+	for rows.Next() {
+		var i LockUnpublishedRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Topic,
+			&i.MsgKey,
+			&i.EventType,
+			&i.Payload,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const markPublished = `-- name: MarkPublished :exec
+UPDATE outbox
+SET published_at = now()
+WHERE id = ANY($1::bigint[])
+`
+
+func (q *Queries) MarkPublished(ctx context.Context, ids []int64) error {
+	_, err := q.db.Exec(ctx, markPublished, ids)
+	return err
 }
