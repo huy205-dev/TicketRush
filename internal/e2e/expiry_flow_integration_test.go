@@ -120,14 +120,10 @@ func testExpiryFlow(t *testing.T, backend string) {
 		t.Errorf("order.expired payload = %+v", ev)
 	}
 
-	var unpublished int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM outbox WHERE published_at IS NULL`).Scan(&unpublished); err != nil {
-		t.Fatal(err)
-	}
-	if unpublished != 0 {
-		t.Errorf("%d outbox rows left unpublished", unpublished)
-	}
-
+	// Stop the workers before checking the outbox. The relay produces a
+	// batch before it marks the rows published, so the consumer can see the
+	// records a moment before the commit; a stopping relay always finishes
+	// its batch, which makes the check below deterministic.
 	cancel()
 	for name, done := range map[string]chan error{"relay": relayDone, "expiry": expiryDone} {
 		select {
@@ -136,8 +132,16 @@ func testExpiryFlow(t *testing.T, backend string) {
 				t.Errorf("%s stopped with %v", name, err)
 			}
 		case <-time.After(10 * time.Second):
-			t.Errorf("%s did not stop", name)
+			t.Fatalf("%s did not stop", name)
 		}
+	}
+
+	var unpublished int
+	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM outbox WHERE published_at IS NULL`).Scan(&unpublished); err != nil {
+		t.Fatal(err)
+	}
+	if unpublished != 0 {
+		t.Errorf("%d outbox rows left unpublished after the relay stopped", unpublished)
 	}
 }
 
