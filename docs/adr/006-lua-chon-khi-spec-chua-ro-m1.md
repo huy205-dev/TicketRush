@@ -34,6 +34,7 @@ VIP có 10 hàng × 50 ghế, CAT1 có 15 hàng × 100 ghế, CAT2 có 20 hàng 
 - `INVENTORY_BACKEND` mặc định là `redis` và `REQUIRE_ADMISSION` mặc định là `true` (theo SPEC mục 11), nhưng hai tính năng này chỉ có từ M2 và M5.
 - Nếu gặp hai giá trị đó, booking từ chối khởi động kèm thông báo rõ ràng, thay vì âm thầm chạy mà không có chúng.
 - `.env.example` đặt tạm `INVENTORY_BACKEND=pg` và `REQUIRE_ADMISSION=false`.
+- *Cập nhật M2:* backend Redis đã có. Booking nhận cả hai giá trị, mặc định là `redis`. Chỉ còn `REQUIRE_ADMISSION=true` bị từ chối cho đến M5.
 
 ### 4. Quy ước API
 
