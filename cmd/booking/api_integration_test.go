@@ -346,3 +346,38 @@ func TestSameIdempotencyKeyInParallelOverHTTP(t *testing.T) {
 		}
 	}
 }
+
+// SPEC.md 7.1: the seat map carries an ETag; If-None-Match with the current
+// one gets 304 without a body, and any seat change produces a new ETag.
+func TestSeatMapETag(t *testing.T) {
+	for _, backend := range []string{"pg", "redis"} {
+		t.Run(backend, func(t *testing.T) {
+			c, eventID := startServer(t, backend)
+			path := "/v1/events/" + jsonInt(eventID) + "/seats"
+
+			first := c.do("GET", path, "", nil)
+			etag := first.header.Get("ETag")
+			if first.status != 200 || etag == "" || first.header.Get("Cache-Control") != "no-cache" {
+				t.Fatalf("first GET = %d, ETag %q, Cache-Control %q", first.status, etag, first.header.Get("Cache-Control"))
+			}
+
+			same := c.do("GET", path, "", map[string]string{"If-None-Match": etag, "Accept-Encoding": "gzip"})
+			if same.status != 304 || len(same.body) != 0 || same.header.Get("ETag") != etag {
+				t.Fatalf("revalidation = %d with %d bytes and ETag %q, want 304 empty with %q",
+					same.status, len(same.body), same.header.Get("ETag"), etag)
+			}
+
+			c.login(90)
+			if r := c.do("POST", "/v1/orders", `{"event_id":`+jsonInt(eventID)+`,"seat_ids":["CAT1-A-1"]}`,
+				map[string]string{"Idempotency-Key": uuid.NewString()}); r.status != 201 {
+				t.Fatalf("create = %d %s", r.status, r.body)
+			}
+
+			changed := c.do("GET", path, "", map[string]string{"If-None-Match": etag})
+			if changed.status != 200 || changed.header.Get("ETag") == etag || len(changed.body) == 0 {
+				t.Fatalf("after a hold = %d with ETag %q (old %q), want 200 with a new ETag",
+					changed.status, changed.header.Get("ETag"), etag)
+			}
+		})
+	}
+}

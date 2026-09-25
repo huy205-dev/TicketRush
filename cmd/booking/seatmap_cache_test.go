@@ -28,10 +28,10 @@ func (c *fakeClock) advance(d time.Duration) {
 func TestSeatMapCacheLoadsOncePerTTL(t *testing.T) {
 	var loads atomic.Int64
 	release := make(chan struct{})
-	c := newSeatMapCache(500*time.Millisecond, func(ctx context.Context, eventID int64) ([]byte, error) {
+	c := newSeatMapCache(500*time.Millisecond, func(ctx context.Context, eventID int64) (renderedSeatMap, error) {
 		loads.Add(1)
 		<-release
-		return []byte(`{"version":0}`), nil
+		return renderedSeatMap{body: []byte(`{"version":0}`), etag: versionETag(0)}, nil
 	})
 	clock := &fakeClock{t: time.Unix(0, 0)}
 	c.now = clock.now
@@ -70,11 +70,12 @@ func TestSeatMapCacheLoadsOncePerTTL(t *testing.T) {
 func TestSeatMapCacheGzipAndErrors(t *testing.T) {
 	boom := errors.New("db down")
 	fail := true
-	c := newSeatMapCache(time.Second, func(context.Context, int64) ([]byte, error) {
+	c := newSeatMapCache(time.Second, func(context.Context, int64) (renderedSeatMap, error) {
 		if fail {
-			return nil, boom
+			return renderedSeatMap{}, boom
 		}
-		return []byte(`{"seats":[]}`), nil
+		body := []byte(`{"seats":[]}`)
+		return renderedSeatMap{body: body, etag: contentETag(body)}, nil
 	})
 
 	if _, err := c.get(context.Background(), 1); !errors.Is(err, boom) {
@@ -113,6 +114,32 @@ func TestAcceptsGzip(t *testing.T) {
 		}
 		if got := acceptsGzip(r); got != want {
 			t.Errorf("acceptsGzip(%q) = %v, want %v", header, got, want)
+		}
+	}
+}
+
+func TestETags(t *testing.T) {
+	if got := versionETag(42); got != `W/"v42"` {
+		t.Errorf("versionETag = %s", got)
+	}
+	a, b := contentETag([]byte("a")), contentETag([]byte("b"))
+	if a == b || a != contentETag([]byte("a")) {
+		t.Errorf("contentETag must be stable and content dependent: %s %s", a, b)
+	}
+
+	tag := `W/"v42"`
+	for header, want := range map[string]bool{
+		`W/"v42"`:         true,
+		`"v42"`:           true, // weak comparison ignores W/
+		`"v1", W/"v42"`:   true,
+		`*`:               true,
+		`W/"v41"`:         false,
+		``:                false,
+		`"v4"`:            false,
+		`W/"v42" , "v43"`: true,
+	} {
+		if got := etagMatches(header, tag); got != want {
+			t.Errorf("etagMatches(%q, %s) = %v, want %v", header, tag, got, want)
 		}
 	}
 }
