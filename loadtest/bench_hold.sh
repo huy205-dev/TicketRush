@@ -5,7 +5,8 @@
 #   1. reset the database (goose reset + up), flush Redis, seed the demo event;
 #   2. start a fresh booking process with INVENTORY_BACKEND=<backend>;
 #   3. run loadtest/hold_contention.js (BUYER_MODE=iteration);
-#   4. stop booking and check the data (loadtest/sql/*.sql).
+#   4. stop booking and check the data: loadtest/sql/*.sql, plus
+#      loadtest/check_redis.sh for the redis backend.
 # Then reports the median, min and max of every metric across the runs.
 #
 # Usage: loadtest/bench_hold.sh <pg|redis> [runs]    (or: make bench-hold BACKEND=pg)
@@ -100,6 +101,7 @@ for i in $(seq 1 "$runs"); do
   {
     check_sql loadtest/sql/checks_common.sql
     if [ "$backend" = pg ]; then check_sql loadtest/sql/checks_pg.sql; fi
+    if [ "$backend" = redis ]; then ./loadtest/check_redis.sh 1; fi
   } >"$out/run-$i-checks.txt"
   checks=$(jq -R -s 'split("\n") | map(select(length > 0) | split("|") | {(.[0]): (.[1] | tonumber)}) | add' "$out/run-$i-checks.txt")
   log_errors=$(grep -c '"level":"ERROR"' "$out/run-$i-booking.log" || true)
