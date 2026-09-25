@@ -337,20 +337,30 @@ func (s *Service) writeEvent(ctx context.Context, tx pgx.Tx, eventType string, o
 	return writeOrderEvent(ctx, tx, eventType, o)
 }
 
-// writeOrderEvent adds the outbox message for a state change of o; tx must
-// be the transaction that made the change.
+// writeOrderEvent adds the outbox message for a state change of o on
+// orders.v1; tx must be the transaction that made the change.
 func writeOrderEvent(ctx context.Context, tx pgx.Tx, eventType string, o *Order) error {
+	return writeEvent(ctx, tx, events.TopicOrders, eventType, orderEvent(o))
+}
+
+// orderEvent is the common event payload for o (SPEC.md section 10).
+func orderEvent(o *Order) events.OrderEvent {
+	return events.OrderEvent{
+		OrderID:  o.ID,
+		Event:    o.EventID,
+		UserID:   o.UserID,
+		SeatIDs:  o.SeatIDs(),
+		TotalVND: o.TotalVND,
+	}
+}
+
+// writeEvent adds ev to the outbox, keyed by its order, in tx.
+func writeEvent(ctx context.Context, tx pgx.Tx, topic, eventType string, ev events.OrderEvent) error {
 	_, err := outbox.Write(ctx, tx, outbox.Message{
-		Topic:     events.TopicOrders,
-		Key:       o.ID.String(),
+		Topic:     topic,
+		Key:       ev.OrderID.String(),
 		EventType: eventType,
-		Payload: events.OrderEvent{
-			OrderID:  o.ID,
-			Event:    o.EventID,
-			UserID:   o.UserID,
-			SeatIDs:  o.SeatIDs(),
-			TotalVND: o.TotalVND,
-		},
+		Payload:   ev,
 	})
 	return err
 }

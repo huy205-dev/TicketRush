@@ -22,3 +22,13 @@ type Order struct {
 	CreatedAt      time.Time
 	UpdatedAt      time.Time
 }
+
+type Refund struct {
+	ProviderTxnID string
+	OrderID       uuid.UUID
+	AmountVnd     int64
+	Reason        string
+	Status        string
+	CreatedAt     time.Time
+	CompletedAt   *time.Time
+}

@@ -7,10 +7,33 @@ package orderdb
 
 import (
 	"context"
+	"time"
 
 	"github.com/google/uuid"
-	"time"
 )
+
+const completeRefund = `-- name: CompleteRefund :one
+UPDATE refunds
+SET status = 'SUCCEEDED', completed_at = now()
+WHERE provider_txn_id = $1 AND status = 'PENDING'
+RETURNING provider_txn_id, order_id, amount_vnd, reason, status, created_at, completed_at
+`
+
+// PENDING -> SUCCEEDED once; zero rows means it was already completed.
+func (q *Queries) CompleteRefund(ctx context.Context, providerTxnID string) (Refund, error) {
+	row := q.db.QueryRow(ctx, completeRefund, providerTxnID)
+	var i Refund
+	err := row.Scan(
+		&i.ProviderTxnID,
+		&i.OrderID,
+		&i.AmountVnd,
+		&i.Reason,
+		&i.Status,
+		&i.CreatedAt,
+		&i.CompletedAt,
+	)
+	return i, err
+}
 
 const expireDueOrders = `-- name: ExpireDueOrders :many
 WITH due AS (
@@ -137,6 +160,25 @@ func (q *Queries) GetOrderForUpdate(ctx context.Context, id uuid.UUID) (Order, e
 	return i, err
 }
 
+const getRefund = `-- name: GetRefund :one
+SELECT provider_txn_id, order_id, amount_vnd, reason, status, created_at, completed_at FROM refunds WHERE provider_txn_id = $1
+`
+
+func (q *Queries) GetRefund(ctx context.Context, providerTxnID string) (Refund, error) {
+	row := q.db.QueryRow(ctx, getRefund, providerTxnID)
+	var i Refund
+	err := row.Scan(
+		&i.ProviderTxnID,
+		&i.OrderID,
+		&i.AmountVnd,
+		&i.Reason,
+		&i.Status,
+		&i.CreatedAt,
+		&i.CompletedAt,
+	)
+	return i, err
+}
+
 const insertHeldOrder = `-- name: InsertHeldOrder :one
 INSERT INTO orders (id, event_id, user_id, status, total_vnd, idempotency_key, request_hash, hold_expires_at)
 VALUES (
@@ -211,6 +253,80 @@ func (q *Queries) InsertOrderSeats(ctx context.Context, arg InsertOrderSeatsPara
 	return err
 }
 
+const insertPayment = `-- name: InsertPayment :one
+INSERT INTO payments (provider_txn_id, order_id, amount_vnd, status, outcome)
+VALUES ($1, $2, $3, $4, '')
+ON CONFLICT (provider_txn_id) DO NOTHING
+RETURNING provider_txn_id
+`
+
+type InsertPaymentParams struct {
+	ProviderTxnID string
+	OrderID       uuid.UUID
+	AmountVnd     int64
+	Status        string
+}
+
+// Returns nothing when the provider_txn_id was already recorded: the webhook
+// is a duplicate. The outcome is set once the transaction knows it.
+func (q *Queries) InsertPayment(ctx context.Context, arg InsertPaymentParams) (string, error) {
+	row := q.db.QueryRow(ctx, insertPayment,
+		arg.ProviderTxnID,
+		arg.OrderID,
+		arg.AmountVnd,
+		arg.Status,
+	)
+	var provider_txn_id string
+	err := row.Scan(&provider_txn_id)
+	return provider_txn_id, err
+}
+
+const insertRefund = `-- name: InsertRefund :exec
+INSERT INTO refunds (provider_txn_id, order_id, amount_vnd, reason, status)
+VALUES ($1, $2, $3, $4, 'PENDING')
+`
+
+type InsertRefundParams struct {
+	ProviderTxnID string
+	OrderID       uuid.UUID
+	AmountVnd     int64
+	Reason        string
+}
+
+func (q *Queries) InsertRefund(ctx context.Context, arg InsertRefundParams) error {
+	_, err := q.db.Exec(ctx, insertRefund,
+		arg.ProviderTxnID,
+		arg.OrderID,
+		arg.AmountVnd,
+		arg.Reason,
+	)
+	return err
+}
+
+const insertTickets = `-- name: InsertTickets :exec
+INSERT INTO tickets (id, order_id, event_id, seat_id)
+SELECT unnest($1::uuid[]), $2::uuid, $3::bigint, unnest($4::text[])
+`
+
+type InsertTicketsParams struct {
+	Ids     []uuid.UUID
+	OrderID uuid.UUID
+	EventID int64
+	SeatIds []string
+}
+
+// One ticket per seat; UNIQUE (event_id, seat_id) is the last guard against
+// selling a seat twice. ids and seat_ids have the same length.
+func (q *Queries) InsertTickets(ctx context.Context, arg InsertTicketsParams) error {
+	_, err := q.db.Exec(ctx, insertTickets,
+		arg.Ids,
+		arg.OrderID,
+		arg.EventID,
+		arg.SeatIds,
+	)
+	return err
+}
+
 const listOrderSeats = `-- name: ListOrderSeats :many
 SELECT seat_id, price_vnd
 FROM order_seats
@@ -233,6 +349,45 @@ func (q *Queries) ListOrderSeats(ctx context.Context, orderID uuid.UUID) ([]List
 	for rows.Next() {
 		var i ListOrderSeatsRow
 		if err := rows.Scan(&i.SeatID, &i.PriceVnd); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listOrderTickets = `-- name: ListOrderTickets :many
+SELECT id, seat_id, qr_payload, issued_at
+FROM tickets
+WHERE order_id = $1
+ORDER BY seat_id
+`
+
+type ListOrderTicketsRow struct {
+	ID        uuid.UUID
+	SeatID    string
+	QrPayload *string
+	IssuedAt  *time.Time
+}
+
+func (q *Queries) ListOrderTickets(ctx context.Context, orderID uuid.UUID) ([]ListOrderTicketsRow, error) {
+	rows, err := q.db.Query(ctx, listOrderTickets, orderID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListOrderTicketsRow
+	for rows.Next() {
+		var i ListOrderTicketsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.SeatID,
+			&i.QrPayload,
+			&i.IssuedAt,
+		); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -274,6 +429,79 @@ func (q *Queries) ListSeatsOfOrders(ctx context.Context, orderIds []uuid.UUID) (
 		return nil, err
 	}
 	return items, nil
+}
+
+const lockOrderForPayment = `-- name: LockOrderForPayment :one
+SELECT o.id, o.event_id, o.user_id, o.status, o.total_vnd, o.idempotency_key, o.request_hash, o.hold_expires_at, o.created_at, o.updated_at, (now() <= o.hold_expires_at) AS hold_active
+FROM orders o
+WHERE o.id = $1
+FOR UPDATE
+`
+
+type LockOrderForPaymentRow struct {
+	ID             uuid.UUID
+	EventID        int64
+	UserID         int64
+	Status         string
+	TotalVnd       int64
+	IdempotencyKey string
+	RequestHash    string
+	HoldExpiresAt  time.Time
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+	HoldActive     bool
+}
+
+// Locks the order for the webhook transaction (SPEC.md 9.3) and says, by the
+// database clock, whether the hold is still running.
+func (q *Queries) LockOrderForPayment(ctx context.Context, id uuid.UUID) (LockOrderForPaymentRow, error) {
+	row := q.db.QueryRow(ctx, lockOrderForPayment, id)
+	var i LockOrderForPaymentRow
+	err := row.Scan(
+		&i.ID,
+		&i.EventID,
+		&i.UserID,
+		&i.Status,
+		&i.TotalVnd,
+		&i.IdempotencyKey,
+		&i.RequestHash,
+		&i.HoldExpiresAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.HoldActive,
+	)
+	return i, err
+}
+
+const setPaymentOutcome = `-- name: SetPaymentOutcome :exec
+UPDATE payments SET outcome = $1 WHERE provider_txn_id = $2
+`
+
+type SetPaymentOutcomeParams struct {
+	Outcome       string
+	ProviderTxnID string
+}
+
+func (q *Queries) SetPaymentOutcome(ctx context.Context, arg SetPaymentOutcomeParams) error {
+	_, err := q.db.Exec(ctx, setPaymentOutcome, arg.Outcome, arg.ProviderTxnID)
+	return err
+}
+
+const setTicketQR = `-- name: SetTicketQR :exec
+UPDATE tickets
+SET qr_payload = $1, issued_at = now()
+WHERE id = $2 AND qr_payload IS NULL
+`
+
+type SetTicketQRParams struct {
+	QrPayload *string
+	TicketID  uuid.UUID
+}
+
+// Fills a ticket's QR payload once; a ticket already issued keeps its own.
+func (q *Queries) SetTicketQR(ctx context.Context, arg SetTicketQRParams) error {
+	_, err := q.db.Exec(ctx, setTicketQR, arg.QrPayload, arg.TicketID)
+	return err
 }
 
 const transitionOrder = `-- name: TransitionOrder :one

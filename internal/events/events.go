@@ -55,4 +55,10 @@ type OrderEvent struct {
 	UserID   int64    `json:"user_id"`
 	SeatIDs  []string `json:"seat_ids"`
 	TotalVND int64    `json:"total_vnd"`
+
+	// Refund events (order.refund_requested, order.refunded) name the payment
+	// being refunded, its amount and why.
+	ProviderTxnID string `json:"provider_txn_id,omitempty"`
+	AmountVND     int64  `json:"amount_vnd,omitempty"`
+	Reason        string `json:"reason,omitempty"`
 }
