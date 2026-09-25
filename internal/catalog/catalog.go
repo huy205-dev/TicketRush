@@ -200,7 +200,7 @@ type SeatMap struct {
 	// a counter (pg) report 0 and Versioned is false.
 	Version   int64
 	Versioned bool
-	Seats   []SeatState
+	Seats     []SeatState
 }
 
 // SeatState is a seat with its status.
