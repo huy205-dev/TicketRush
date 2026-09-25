@@ -24,7 +24,7 @@ Mỗi quyết định kỹ thuật quan trọng một file `NNN-ten-ngan.md`, vi
 | 002 | Transactional outbox thay vì gửi Kafka trực tiếp | M3 | Chưa viết |
 | 003 | Saga và bù trừ bằng hoàn tiền | M4 | Chưa viết |
 | 004 | Cách chọn `ADMIT_BATCH` | M5 | Chưa viết |
-| [005](005-idempotency-key.md) | Idempotency-Key cho API tạo đơn | M1 | Chấp nhận |
-| [006](006-lua-chon-khi-spec-chua-ro-m1.md) | Các lựa chọn ở M1 khi SPEC chưa nói rõ | M1 | Chấp nhận, mục 1 chờ quyết định |
+| [005](005-idempotency-key.md) | Idempotency-Key cho API tạo đơn | M1 (xử lý request đang chạy: M2) | Chấp nhận |
+| [006](006-lua-chon-khi-spec-chua-ro-m1.md) | Các lựa chọn ở M1 khi SPEC chưa nói rõ | M1 | Chấp nhận |
 
 ADR 000–004 là các ADR SPEC.md yêu cầu. Từ 005 trở đi là các quyết định phát sinh trong lúc làm.
