@@ -69,6 +69,13 @@ stop_booking() {
 trap stop_booking EXIT
 trap 'stop_booking; exit 130' INT TERM
 
+# infra_started prints when each infrastructure container last started. A
+# change during a run means something restarted it, and the run is void.
+infra_started() {
+  docker inspect -f '{{.Name}} {{.State.StartedAt}}' \
+    $("${compose[@]}" ps -q postgres redis redpanda) | sort
+}
+
 # check_sql prints "<name>|<number>" rows for one checks file.
 check_sql() {
   "${compose[@]}" exec -T postgres psql "$DATABASE_URL" -At -F '|' -v ON_ERROR_STOP=1 -f - <"$1"
@@ -77,6 +84,7 @@ check_sql() {
 : >"$out/runs.jsonl"
 for i in $(seq 1 "$runs"); do
   echo "== run $i/$runs"
+  started_before=$(infra_started)
   goose -dir migrations postgres "$DATABASE_URL" reset >/dev/null 2>&1
   goose -dir migrations postgres "$DATABASE_URL" up >/dev/null 2>&1
   "${compose[@]}" exec -T redis redis-cli FLUSHALL >/dev/null
@@ -102,6 +110,12 @@ for i in $(seq 1 "$runs"); do
     loadtest/hold_contention.js >"$out/run-$i-k6.txt" 2>&1 || k6_exit=$?
   rm -f "$out/run-$i-tokens.json"
   stop_booking
+  if [ "$(infra_started)" != "$started_before" ]; then
+    echo "an infrastructure container restarted during run $i; results are void" >&2
+    echo "before: $started_before" >&2
+    echo "after:  $(infra_started)" >&2
+    exit 1
+  fi
   # 99 means thresholds were crossed, which is a result, not a failure.
   if [ "$k6_exit" -ne 0 ] && [ "$k6_exit" -ne 99 ]; then
     echo "k6 failed with exit $k6_exit; see $out/run-$i-k6.txt" >&2
