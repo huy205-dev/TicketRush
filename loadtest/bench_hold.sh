@@ -59,7 +59,9 @@ go build -o "$out/booking" ./cmd/booking
 go build -o "$out/seed" ./cmd/seed
 
 booking_pid=""
+sampler_pid=""
 stop_booking() {
+  if [ -n "$sampler_pid" ]; then kill "$sampler_pid" 2>/dev/null || true; fi
   if [ -n "$booking_pid" ]; then
     kill -TERM "$booking_pid" 2>/dev/null || true
     wait "$booking_pid" 2>/dev/null || true
@@ -74,6 +76,39 @@ trap 'stop_booking; exit 130' INT TERM
 infra_started() {
   docker inspect -f '{{.Name}} {{.State.StartedAt}}' \
     $("${compose[@]}" ps -q postgres redis redpanda) | sort
+}
+
+# cpu_seconds converts ps TIME ("M:SS.ss" on macOS, "[DD-]HH:MM:SS" on
+# Linux) to seconds.
+cpu_seconds() {
+  ps -o time= -p "$1" | awk '{
+    n = split($1, d, "-"); t = (n == 2) ? d[2] : d[1]; days = (n == 2) ? d[1] : 0
+    m = split(t, p, ":"); s = 0
+    for (i = 1; i <= m; i++) s = s * 60 + p[i]
+    printf "%.2f\n", s + days * 86400
+  }'
+}
+
+# start_cpu_sampler records machine-wide CPU usage once a second into $1
+# (macOS top, or vmstat on Linux) and sets sampler_pid. It runs as a single
+# process with all output redirected, so killing sampler_pid stops it and
+# leaves no pipe open.
+start_cpu_sampler() {
+  if [ "$(uname)" = Darwin ]; then
+    top -l 0 -s 1 -n 0 >"$1" 2>/dev/null &
+  else
+    vmstat 1 >"$1" 2>/dev/null &
+  fi
+  sampler_pid=$!
+}
+
+# busy_percentages prints one busy-CPU percentage per sample of file $1.
+busy_percentages() {
+  if [ "$(uname)" = Darwin ]; then
+    awk '/CPU usage/ { gsub("%", ""); print 100 - $7 }' "$1"
+  else
+    awk 'NR > 2 { print 100 - $15 }' "$1"
+  fi
 }
 
 # check_sql prints "<name>|<number>" rows for one checks file.
@@ -105,10 +140,27 @@ for i in $(seq 1 "$runs"); do
   fi
 
   k6_exit=0
+  booking_cpu_before=$(cpu_seconds "$booking_pid")
+  start_cpu_sampler "$out/run-$i-cpu-raw.txt"
   # open() in k6 resolves relative paths against the script's directory.
-  TOKENS_FILE="$PWD/$out/run-$i-tokens.json" k6 run --summary-export="$out/run-$i-summary.json" --out csv="$out/run-$i.csv.gz" \
+  # /usr/bin/time -p reports the CPU time k6 itself used.
+  TOKENS_FILE="$PWD/$out/run-$i-tokens.json" /usr/bin/time -p -o "$out/run-$i-k6-time.txt" \
+    k6 run --summary-export="$out/run-$i-summary.json" --out csv="$out/run-$i.csv.gz" \
     loadtest/hold_contention.js >"$out/run-$i-k6.txt" 2>&1 || k6_exit=$?
+  booking_cpu_after=$(cpu_seconds "$booking_pid")
+  kill "$sampler_pid" 2>/dev/null || true
+  wait "$sampler_pid" 2>/dev/null || true
+  busy_percentages "$out/run-$i-cpu-raw.txt" >"$out/run-$i-cpu.txt"
+  rm -f "$out/run-$i-cpu-raw.txt"
   rm -f "$out/run-$i-tokens.json"
+  cpu=$(awk -v bb="$booking_cpu_before" -v ba="$booking_cpu_after" '
+    /^real/ { real = $2 } /^user/ { u = $2 } /^sys/ { s = $2 }
+    END { printf "{\"k6_cores\":%.2f,\"booking_cores\":%.2f}", (u + s) / real, (ba - bb) / real }
+  ' "$out/run-$i-k6-time.txt")
+  machine_busy=$(sort -n "$out/run-$i-cpu.txt" | awk '
+    { v[NR] = $1; sum += $1 }
+    END { if (NR == 0) { print "{}"; exit } printf "{\"machine_busy_mean\":%.1f,\"machine_busy_p90\":%.1f}", sum / NR, v[int((NR - 1) * 0.9) + 1] }')
+  cpu=$(jq -c -n --argjson a "$cpu" --argjson b "$machine_busy" '$a + $b')
   stop_booking
   if [ "$(infra_started)" != "$started_before" ]; then
     echo "an infrastructure container restarted during run $i; results are void" >&2
@@ -134,7 +186,7 @@ for i in $(seq 1 "$runs"); do
 
   jq -c -n \
     --argjson run "$i" --argjson k6_exit "$k6_exit" --argjson peak "$peak" \
-    --argjson checks "$checks" --argjson log_errors "$log_errors" \
+    --argjson checks "$checks" --argjson log_errors "$log_errors" --argjson cpu "$cpu" \
     --slurpfile summary "$out/run-$i-summary.json" --slurpfile server "$out/run-$i-server.json" '
     $summary[0].metrics as $m
     | $server[0] as $s
@@ -163,6 +215,8 @@ for i in $(seq 1 "$runs"); do
         srv_409_share_db_wait: $s.orders["409"].share_waiting_for_db, srv_201_share_db_wait: $s.orders["201"].share_waiting_for_db,
         pool_empty_acquires: $s.pool.empty_acquires, pool_empty_wait_ms: $s.pool.empty_acquire_wait_ms,
         pool_acquires: $s.pool.acquires,
+        k6_cores: $cpu.k6_cores, booking_cores: $cpu.booking_cores,
+        machine_busy_mean: $cpu.machine_busy_mean, machine_busy_p90: $cpu.machine_busy_p90,
         orders: $checks["info:orders"],
         invariant_violations: ([$checks | to_entries[] | select(.key | startswith("info:") | not) | .value] | add),
         booking_log_errors: $log_errors,
@@ -206,6 +260,8 @@ jq -s '
     srv_201_share_db_wait: stat(.srv_201_share_db_wait), srv_409_share_db_wait: stat(.srv_409_share_db_wait),
     pool_empty_acquires: stat(.pool_empty_acquires), pool_empty_wait_ms: stat(.pool_empty_wait_ms),
     tokens_exhausted: ([.[].tokens_exhausted] | add),
+    k6_cores: stat(.k6_cores), booking_cores: stat(.booking_cores),
+    machine_busy_mean: stat(.machine_busy_mean), machine_busy_p90: stat(.machine_busy_p90),
     p99_threshold_ok_runs: ([.[] | select(.p99_threshold_ok)] | length),
     invariants_ok_runs: ([.[] | select(.invariant_violations == 0)] | length),
     booking_log_errors: ([.[].booking_log_errors] | add),
@@ -215,7 +271,7 @@ jq -s '
 jq -r \
   --arg backend "$backend" --arg commit "$commit" --arg started "$started" \
   --arg machine "$machine" --arg docker_vm "$docker_vm" --arg pg "$pg_settings" \
-  --arg booking "$booking_cfg" --arg k6v "$(k6 version | head -1 | awk '{print $2}')" --arg k6p "$k6_params" '
+  --arg booking "$booking_cfg" --arg k6v "$(k6 version | head -1 | awk '{print $2}')" --arg k6p "$k6_params" --arg ncpu "$(getconf _NPROCESSORS_ONLN)" '
   def r2: (. * 100 | round) / 100;
   def fmt: if type == "number" then (if . == (. | floor) then tostring else (r2 | tostring) end) else tostring end;
   def row(name; s): "| \(name) | \(s.median | fmt) | \(s.min | fmt) | \(s.max | fmt) |";
@@ -260,6 +316,15 @@ jq -r \
   row("409: tỉ lệ thời gian chờ pgxpool"; .srv_409_share_db_wait),
   row("Số lần acquire phải chờ (pool rỗng)"; .pool_empty_acquires),
   row("Tổng thời gian chờ khi pool rỗng (ms)"; .pool_empty_wait_ms),
+  "",
+  "CPU trong lúc k6 chạy (máy có \($ncpu) CPU logic; thời gian CPU chia cho thời gian thực):",
+  "",
+  "| Chỉ số | Trung vị | Min | Max |",
+  "|---|---|---|---|",
+  row("k6 (số core dùng trung bình)"; .k6_cores),
+  row("booking (số core dùng trung bình)"; .booking_cores),
+  row("Cả máy: % CPU bận, trung bình"; .machine_busy_mean),
+  row("Cả máy: % CPU bận, p90 theo giây"; .machine_busy_p90),
   "",
   "- VU hết token: \(.tokens_exhausted) lần (phải là 0, nếu không kịch bản đã bị cắt bớt)",
   "- Ngưỡng p99 < 200 ms đạt ở \(.p99_threshold_ok_runs)/\(.runs) lần",
