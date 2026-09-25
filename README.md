@@ -58,6 +58,11 @@ Chi tiết và nhận xét ở [docs/results.md](docs/results.md#so-sánh-pg-và
 
 Redis: đỉnh +40%, p50 −90%, p95 −48%, nhưng p99 chỉ −10%. Vẫn chưa đạt mục tiêu ≥ 5.000 req/s và p99 < 200 ms.
 
+[Điều tra M2](docs/results.md#điều-tra-m2) cho thấy p99 khoảng 1 s là do **máy tạo tải bị bão hoà**:
+- k6 chạy cùng máy, dùng khoảng 10/15 core để parse sơ đồ ghế;
+- booking chỉ dùng khoảng 0,25 core, và p99 phía server của request thua chỉ khoảng 15–30 ms;
+- tăng pool PostgreSQL từ 20 lên 80 xoá hết thời gian chờ kết nối nhưng không làm p99 phía k6 giảm.
+
 Outbox relay (`make bench-relay`): xả 200.000 sự kiện lên Redpanda với trung vị **101.085 sự kiện/s** [81.682–106.001]. Relay không phải điểm nghẽn ([chi tiết](docs/results.md#outbox-relay)).
 
 ## Quyết định kỹ thuật

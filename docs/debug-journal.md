@@ -12,6 +12,36 @@ Mỗi lỗi khó gặp phải được ghi theo mẫu dưới đây, mới nhấ
 **Bài học:**
 ```
 
+## 2026-09-25 — p99 khoảng 1 s không giảm khi chuyển sang Redis
+
+**Triệu chứng:** ở M2, backend Redis cải thiện RPS đỉnh (+40%) và p50 (−90%) so với PG, nhưng p99 phía k6 vẫn khoảng 1 s ở cả hai backend.
+
+**Cách điều tra:**
+1. Giả thuyết đầu tiên: request thua (409) vẫn tra Idempotency-Key trong PostgreSQL, nên phải xếp hàng chờ pool 20 kết nối cùng các transaction ghi đơn và dev-login.
+2. Loại dev-login khỏi tải: token được tạo sẵn trước khi đo.
+3. Thêm công cụ đo:
+   - tracer pgx cho thời gian chờ pgxpool và thời gian chạy query, hook go-redis, ghi vào access log từng request;
+   - log thống kê pgxpool mỗi giây;
+   - latency phía k6 tách theo 201/409;
+   - thời gian CPU của k6 và booking.
+4. Chạy lại với `DB_MAX_CONNS` = 20, 40, 80, chỉ đổi đúng biến này. Thời gian chờ pool của request thua giảm từ p99 10,5 ms xuống 0,03 ms, nhưng p99 phía k6 vẫn khoảng 0,9–1,1 s.
+5. So hai phía: phía server p99 của 409 chỉ khoảng 15–30 ms. Booking dùng khoảng 0,25 core; k6 dùng khoảng 10 trên 15 core.
+6. Kiểm chứng bằng cách giảm một nửa số VU: p99 phía k6 giảm khoảng 3 lần, phía server gần như không đổi.
+
+**Nguyên nhân gốc:**
+- Máy tạo tải bị bão hoà. k6 chạy cùng máy, và mỗi vòng lặp tải rồi parse sơ đồ ghế 485 KB bằng JavaScript, khoảng 1.000 lần mỗi giây.
+- Độ trễ đo được là hàng đợi ở phía máy tạo tải và hệ điều hành, không phải thời gian booking xử lý.
+- Giả thuyết về pool PostgreSQL chỉ đúng một phần nhỏ (vài ms ở p99) và không giải thích được con số 1 s.
+
+**Cách sửa:**
+- Chưa sửa code nghiệp vụ.
+- Đã thêm công cụ đo (commit `36609fa`, `d18b709`, `715259d`) để mọi lần đo sau đều tách được latency phía server và phía máy tạo tải.
+- Đề xuất cách đo khác, chờ quyết định (xem báo cáo điều tra).
+
+**Bài học:**
+- Trước khi tối ưu một thành phần, phải chứng minh được rằng thời gian thực sự nằm ở thành phần đó. Hai con số từ hai phía (client và server) cùng với mức CPU đã đủ để bác một giả thuyết nghe rất hợp lý.
+- Một thí nghiệm "chỉ đổi một biến" (kích thước pool) mà không thay đổi kết quả chính là bằng chứng mạnh nhất.
+
 ## 2026-09-25 — So khớp Redis với PostgreSQL báo 10.000 vi phạm dù dữ liệu đúng
 
 **Triệu chứng:** lần chạy thử đầu tiên của `loadtest/check_redis.sh` (so sánh key `seat:{1}:*` trong Redis với các đơn `HELD` trong PostgreSQL) báo `redis_key_not_in_pg=5000` và `pg_state_missing_in_redis=5000`. Nghĩa là không dòng nào khớp, trong khi các kiểm tra SQL khác và toàn bộ test tích hợp đều đạt.
