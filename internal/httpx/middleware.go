@@ -12,6 +12,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 
 	"github.com/huy205-dev/ticketrush/internal/platform/logging"
+	"github.com/huy205-dev/ticketrush/internal/platform/timing"
 )
 
 // RequestIDHeader carries the request ID in both directions.
@@ -71,8 +72,9 @@ func AccessLog(logger *slog.Logger, quietPaths ...string) func(http.Handler) htt
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			start := time.Now()
+			ctx, stats := timing.With(r.Context())
 			ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
-			next.ServeHTTP(ww, r)
+			next.ServeHTTP(ww, r.WithContext(ctx))
 
 			status := ww.Status()
 			if status == 0 {
@@ -86,14 +88,15 @@ func AccessLog(logger *slog.Logger, quietPaths ...string) func(http.Handler) htt
 			case quiet[r.URL.Path]:
 				level = slog.LevelDebug
 			}
-			logger.LogAttrs(r.Context(), level, "http request",
+			attrs := append([]slog.Attr{
 				slog.String("method", r.Method),
 				slog.String("route", routePattern(r)),
 				slog.String("path", r.URL.Path),
 				slog.Int("status", status),
 				slog.Int("bytes", ww.BytesWritten()),
 				slog.Float64("duration_ms", float64(time.Since(start).Microseconds())/1000),
-			)
+			}, stats.LogAttrs()...)
+			logger.LogAttrs(r.Context(), level, "http request", attrs...)
 		})
 	}
 }
