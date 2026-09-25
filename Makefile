@@ -9,7 +9,7 @@ LOAD_ENV := set -a && . ./.env && set +a &&
 # non-zero so scripts never mistake a stub for a pass.
 todo = @echo "make $@: chưa triển khai, dự kiến có ở $(1) (SPEC.md mục 12)." >&2; exit 1
 
-.PHONY: help up down ps logs migrate seed sqlc \
+.PHONY: help up down ps logs migrate db-reset seed sqlc load-hold \
 	run-booking run-waitingroom run-relay run-expiry run-ticket run-refunder run-notifier run-fakepay \
 	test test-integration lint fmt bench invariants chaos-redis k8s-up
 
@@ -35,14 +35,19 @@ ps: ## Trạng thái container
 logs: ## Theo dõi log hạ tầng
 	$(COMPOSE) logs -f
 
-migrate: ## goose up
-	$(call todo,M1)
+GOOSE := goose -dir migrations postgres "$$DATABASE_URL"
 
-seed: ## Tạo sự kiện mẫu 5.000 ghế
-	$(call todo,M1)
+migrate: .env ## goose up
+	$(LOAD_ENV) $(GOOSE) up
 
-sqlc: ## Sinh code từ query
-	$(call todo,M1)
+db-reset: .env ## XOÁ SẠCH dữ liệu (goose reset rồi up), chỉ dùng cho dev
+	$(LOAD_ENV) $(GOOSE) reset && $(GOOSE) up
+
+seed: .env ## Tạo sự kiện mẫu 5.000 ghế (sau db-reset thì event_id = 1)
+	$(LOAD_ENV) go run ./cmd/seed
+
+sqlc: ## Sinh code từ internal/*/queries.sql
+	sqlc generate
 
 ## ---- Chạy service ---------------------------------------------------------
 
@@ -75,16 +80,25 @@ run-fakepay: ## Cổng thanh toán giả lập trên :8090
 test: ## Unit test (race detector bật)
 	go test -race ./...
 
-test-integration: ## Test tích hợp (cần Docker)
-	go test -race -tags=integration ./...
+test-integration: ## Test tích hợp với PostgreSQL thật (testcontainers, cần Docker)
+	go test -race -count=1 -tags=integration ./...
 
-lint: ## gofmt, go vet, staticcheck
+lint: ## gofmt, go vet, staticcheck, code sqlc đã sinh khớp query
 	@unformatted="$$(gofmt -l .)"; if [ -n "$$unformatted" ]; then echo "Cần chạy gofmt (make fmt):"; echo "$$unformatted"; exit 1; fi
-	go vet ./...
-	go tool staticcheck ./...
+	go vet -tags=integration ./...
+	go tool staticcheck -tags=integration ./...
+	sqlc diff
 
 fmt: ## gofmt -w
 	gofmt -w .
+
+LOADTEST_OUT := loadtest/out
+
+load-hold: ## k6 kịch bản mở bán; cần booking đang chạy và sự kiện đã seed
+	@mkdir -p $(LOADTEST_OUT)
+	k6 run --summary-export=$(LOADTEST_OUT)/hold_contention-summary.json \
+		--out csv=$(LOADTEST_OUT)/hold_contention.csv.gz loadtest/hold_contention.js
+	./loadtest/peak_rps.sh $(LOADTEST_OUT)/hold_contention.csv.gz hold
 
 bench: ## seed → k6 → invariants → tóm tắt
 	$(call todo,M7)
