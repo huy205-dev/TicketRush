@@ -17,12 +17,14 @@ Mỗi quyết định kỹ thuật quan trọng một file `NNN-ten-ngan.md`, vi
 
 ## Danh sách
 
-Chưa có ADR nào. Các ADR SPEC.md yêu cầu:
+| ADR | Chủ đề | Milestone | Trạng thái |
+|---|---|---|---|
+| [000](000-ban-goc-postgresql.md) | Làm bản gốc giữ ghế chỉ bằng PostgreSQL trước | M1 | Chấp nhận |
+| 001 | Giữ ghế bằng Redis Lua | M2 | Chưa viết |
+| 002 | Transactional outbox thay vì gửi Kafka trực tiếp | M3 | Chưa viết |
+| 003 | Saga và bù trừ bằng hoàn tiền | M4 | Chưa viết |
+| 004 | Cách chọn `ADMIT_BATCH` | M5 | Chưa viết |
+| [005](005-idempotency-key.md) | Idempotency-Key cho API tạo đơn | M1 | Chấp nhận |
+| [006](006-lua-chon-khi-spec-chua-ro-m1.md) | Các lựa chọn ở M1 khi SPEC chưa nói rõ | M1 | Chấp nhận, mục 1 chờ quyết định |
 
-| ADR | Chủ đề | Milestone |
-|---|---|---|
-| 000 | Lý do làm bản gốc chỉ dùng PostgreSQL | M1 |
-| 001 | Giữ ghế bằng Redis Lua | M2 |
-| 002 | Transactional outbox thay vì gửi Kafka trực tiếp | M3 |
-| 003 | Saga và bù trừ bằng hoàn tiền | M4 |
-| 004 | Cách chọn `ADMIT_BATCH` | M5 |
+ADR 000–004 là các ADR SPEC.md yêu cầu. Từ 005 trở đi là các quyết định phát sinh trong lúc làm.
