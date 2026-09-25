@@ -38,21 +38,26 @@ PostgreSQL là nguồn sự thật; Redis chỉ giữ trạng thái tạm và d�
 
 ## Kết quả đo
 
-Baseline PostgreSQL, kịch bản mở bán 2.000 VU. Đo trên MacBook Apple M5 Pro 24 GiB, k6 chạy cùng máy, nên chỉ để so sánh tương đối. Chi tiết, cách tính và nhận xét ở [docs/results.md](docs/results.md#baseline-pg).
+Baseline PostgreSQL, đo bằng `make bench-hold BACKEND=pg`:
+- 3 lần, mỗi lần reset DB và seed lại;
+- kịch bản mở bán 2.000 VU, mỗi vòng lặp là một người mua mới;
+- máy MacBook Apple M5 Pro 24 GiB, k6 chạy cùng máy, nên chỉ để so sánh tương đối.
 
-| Backend | Chế độ | Request giữ ghế | RPS đỉnh | p50 | p95 | p99 | Lỗi | Ghế bán trùng |
-|---|---|---|---|---|---|---|---|---|
-| pg | `BUYER_MODE=vu` (2 lần) | 3.728 / 3.901 | 888 / 765 | 3,1 / 3,0 ms | 35,4 / 17,0 ms | 175,2 / 35,5 ms | 0% | 0 |
-| pg | `BUYER_MODE=iteration` | 14.825 | 2.209 | 348 ms | 790 ms | 839 ms | 0% | 0 |
+Chi tiết và nhận xét ở [docs/results.md](docs/results.md#baseline-pg).
 
-Chưa đạt mục tiêu ≥ 5.000 req/s và p99 < 200 ms ở chế độ tải nặng. Bản Redis (M2) sẽ được đo trên cùng kịch bản.
+| Backend | Request giữ ghế | RPS đỉnh | p50 | p95 | p99 | Lỗi | Ghế bán trùng |
+|---|---|---|---|---|---|---|---|
+| pg (trung vị [min–max]) | 14.776 [14.275–14.918] | 2.124 [2.086–2.184] | 399 ms [383–503] | 804 ms [766–1.342] | 971 ms [875–1.504] | 0% | 0 |
+| redis | chưa đo (M2) | | | | | | |
+
+Chưa đạt mục tiêu ≥ 5.000 req/s và p99 < 200 ms.
 
 ## Quyết định kỹ thuật
 
 Danh sách đầy đủ ở [docs/adr/](docs/adr/README.md).
 
 - [ADR-000](docs/adr/000-ban-goc-postgresql.md): làm bản gốc giữ ghế chỉ bằng PostgreSQL (`SELECT … FOR UPDATE`) trước khi dùng Redis.
-- [ADR-005](docs/adr/005-idempotency-key.md): Idempotency-Key: hash trên request đã chuẩn hoá, xử lý request song song cùng key.
+- [ADR-005](docs/adr/005-idempotency-key.md): Idempotency-Key: hash trên request đã chuẩn hoá. Request song song cùng key sẽ nhận `409 IDEMPOTENCY_KEY_IN_PROGRESS` nhờ khoá Redis (làm ở M2).
 - [ADR-006](docs/adr/006-lua-chon-khi-spec-chua-ro-m1.md): các lựa chọn khi SPEC chưa nói rõ ở M1.
 
 ## API (booking, `:8080`)
@@ -133,10 +138,11 @@ CI (GitHub Actions, [.github/workflows/ci.yaml](.github/workflows/ci.yaml)) có 
 ### Test tải
 
 ```sh
-make db-reset seed     # dữ liệu sạch, sự kiện id 1
-make run-booking       # terminal khác
-make load-hold         # k6 kịch bản mở bán + tính RPS đỉnh; kết quả vào loadtest/out/
-BUYER_MODE=iteration make load-hold   # biến thể mỗi vòng lặp là một người mua mới
+make bench-hold BACKEND=pg   # đo chuẩn: 3 lần, tự reset DB + seed + chạy booking, in trung vị/min/max
+
+# Hoặc chạy một lần với booking đang chạy sẵn:
+make db-reset seed && make run-booking   # terminal khác
+make load-hold                           # BUYER_MODE=vu để thử chế độ mỗi VU một người mua
 ```
 
 `make bench` và chaos (`make chaos-*`) có từ M7/M8; hiện các target này báo "chưa triển khai" và trả exit code 1.
@@ -158,6 +164,7 @@ BUYER_MODE=iteration make load-hold   # biến thể mỗi vòng lặp là một
 
 ## Hạn chế đã biết
 
+- Request song song cùng Idempotency-Key có thể nhận `409 SEATS_UNAVAILABLE` thay vì `409 IDEMPOTENCY_KEY_IN_PROGRESS`, cho đến khi có khoá Redis ở M2 ([ADR-005](docs/adr/005-idempotency-key.md)). Vẫn luôn chỉ tạo ra một đơn.
 - Chỉ có backend giữ ghế PostgreSQL. Booking từ chối chạy với `INVENTORY_BACKEND=redis` (M2) hoặc `REQUIRE_ADMISSION=true` (M5).
 - Chưa có expiry worker (M3): đơn `HELD` quá hạn vẫn ở trạng thái `HELD` (dù ghế đã được giải phóng khi `seat_holds` hết hạn), nên người đó chưa tạo được đơn mới cho sự kiện cho đến khi tự huỷ đơn cũ.
 - Outbox đã được ghi nhưng chưa có relay đẩy lên Kafka (M3).
