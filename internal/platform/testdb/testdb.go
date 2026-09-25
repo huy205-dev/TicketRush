@@ -44,22 +44,20 @@ type DB struct {
 //	var db *testdb.DB
 //	func TestMain(m *testing.M) { testdb.Main(m, &db) }
 func Main(m *testing.M, dst **DB) {
-	ctx := context.Background()
-	db, err := start(ctx)
+	db, err := Start(context.Background())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "testdb: %v\n", err)
 		os.Exit(1)
 	}
 	*dst = db
 	code := m.Run()
-	db.admin.Close()
-	if err := testcontainers.TerminateContainer(db.container); err != nil {
-		fmt.Fprintf(os.Stderr, "testdb: terminate: %v\n", err)
-	}
+	db.Terminate()
 	os.Exit(code)
 }
 
-func start(ctx context.Context) (*DB, error) {
+// Start launches the container and migrates the template database. Use Main
+// unless the test binary needs other containers too.
+func Start(ctx context.Context) (*DB, error) {
 	c, err := tcpostgres.Run(ctx, Image,
 		tcpostgres.WithDatabase(templateDB),
 		tcpostgres.WithUsername("test"),
@@ -92,6 +90,14 @@ func start(ctx context.Context) (*DB, error) {
 		return nil, fmt.Errorf("admin pool: %w", err)
 	}
 	return &DB{container: c, baseURL: base, admin: admin}, nil
+}
+
+// Terminate stops the container.
+func (d *DB) Terminate() {
+	d.admin.Close()
+	if err := testcontainers.TerminateContainer(d.container); err != nil {
+		fmt.Fprintf(os.Stderr, "testdb: terminate: %v\n", err)
+	}
 }
 
 func migrate(ctx context.Context, dsn string) error {
