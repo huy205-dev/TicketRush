@@ -1,6 +1,6 @@
 # ADR-005: Idempotency-Key cho API tạo đơn
 
-- Trạng thái: Chấp nhận. Phần "request cùng key đang xử lý" đã được sửa sau review M1 và sẽ làm ở M2 (xem mục cuối).
+- Trạng thái: Chấp nhận. Phần "request cùng key đang xử lý" được sửa sau review M1 và đã cài đặt ở M2 (xem mục cuối).
 - Ngày: 2026-09-25
 
 ## Bối cảnh
@@ -74,7 +74,7 @@ Cần một dấu hiệu dùng chung giữa các request, nghĩa là giữa các
 
 ### Quyết định
 
-Chọn phương án 1. Vì phương án hợp lý nhất cần Redis, phần này **làm ở M2** theo đúng chỉ đạo khi review. Thuật toán dự kiến:
+Chọn phương án 1. Vì phương án hợp lý nhất cần Redis, phần này được làm ở M2 theo đúng chỉ đạo khi review. Thuật toán đã cài đặt (`order.Service.Create`, `redisx.Locker`):
 
 1. Validate và tính `request_hash` như hiện nay.
 2. `SET idem:<userId>:<key> <token ngẫu nhiên> NX PX 30000`. TTL phải dài hơn thời gian tối đa của một request (`WriteTimeout` của booking là 15 s).
@@ -87,11 +87,23 @@ Chọn phương án 1. Vì phương án hợp lý nhất cần Redis, phần nà
 
 Khoá này chỉ là trạng thái tạm. Mất khoá chỉ làm sai *mã phản hồi* cho các request trùng đang chạy song song, không bao giờ tạo ra đơn thứ hai. Vì vậy nó phù hợp với nguyên tắc "Redis dựng lại được / PostgreSQL là nguồn sự thật".
 
-**Còn để ngỏ, sẽ chốt ở M2:** khi Redis không trả lời lúc lấy khoá, nên trả `503` (không nhận đơn khi không phân biệt được request trùng), hay bỏ qua khoá và dựa vào ràng buộc unique. Quyết định này sẽ đi cùng cách backend giữ ghế Redis xử lý khi Redis lỗi.
+**Khi Redis không trả lời lúc lấy khoá** (đã chốt trước M2): trả `503 SERVICE_UNAVAILABLE` kèm `Retry-After: 1`, tức là *fail closed*. Khi không phân biệt được request trùng, hệ thống từ chối nhận đơn thay vì bỏ qua khoá. Nếu bỏ qua khoá thì vẫn không tạo trùng đơn, nhờ ràng buộc unique, nhưng request trùng có thể lại nhận `SEATS_UNAVAILABLE` cho chính ghế của mình, đúng hành vi đã bị bác. Hệ quả: từ M2, kể cả khi `INVENTORY_BACKEND=pg`, API tạo đơn cũng phụ thuộc vào Redis.
 
-### Hiện trạng ở M1 và kiểm thử
+### Kiểm thử (M2)
 
-- Hành vi `SEATS_UNAVAILABLE` cho request trùng đang chạy vẫn còn đến M2. Đây là hạn chế đã biết.
-- Test đã có từ M1 và sẽ giữ nguyên ở M2:
-  - `TestCreateSameKeyInParallel` (tầng service) và `TestSameIdempotencyKeyInParallelOverHTTP` (tầng HTTP): đúng 1 request nhận `201`; mọi `200` đều trỏ tới đúng đơn đó; sau khi request thắng hoàn tất, gửi lại cùng key 3 lần đều nhận `200` với đúng đơn đó.
-- M2 sẽ siết điều kiện cho request thua: chỉ được nhận `200` (đúng đơn) hoặc `409 IDEMPOTENCY_KEY_IN_PROGRESS`, không còn `SEATS_UNAVAILABLE`.
+Các test dưới đây chạy trên PostgreSQL và Redis thật, cho cả hai backend giữ ghế.
+
+- `TestCreateSameKeyInParallel` (tầng service) và `TestSameIdempotencyKeyInParallelOverHTTP` (tầng HTTP):
+  - 10 request song song cùng key: đúng 1 request nhận `201`;
+  - các request còn lại chỉ nhận `200` với đúng đơn đó, hoặc `409 IDEMPOTENCY_KEY_IN_PROGRESS` kèm `Retry-After: 1`, không còn `SEATS_UNAVAILABLE`;
+  - sau khi request thắng hoàn tất, gửi lại cùng key 3 lần đều nhận `200` với đúng đơn đó.
+- `TestCreateWhileSameKeyInProgress`:
+  - khi khoá đang bị giữ và chưa có đơn, request nhận `IN_PROGRESS` và không thay đổi gì;
+  - cùng key nhưng user khác thì độc lập;
+  - khoá được nhả thì request tạo được đơn.
+- `TestCreateReplayWhileLockStillHeld`: khoá còn giữ nhưng đơn đã commit thì request nhận lại đơn đó; body khác thì nhận `422`.
+- `TestCreateFailsClosedWithoutLock`: khi không lấy được khoá thì trả `ErrTemporarilyUnavailable` (tức `503`), và không tạo đơn nào.
+- `redisx` có test riêng cho khoá:
+  - 200 goroutine tranh khoá thì đúng 1 goroutine lấy được;
+  - người giữ khoá đã hết hạn không xoá được khoá của người mới;
+  - Redis không chạy thì trả lỗi.
