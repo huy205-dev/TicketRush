@@ -1,6 +1,6 @@
 # ADR-006: Các lựa chọn ở M1 khi SPEC chưa nói rõ
 
-- Trạng thái: Chấp nhận, riêng mục 1 đang chờ người dùng quyết định
+- Trạng thái: Chấp nhận (mục 1 được chốt khi review M1)
 - Ngày: 2026-09-25
 
 ## Bối cảnh
@@ -9,14 +9,21 @@ Khi làm M1, có một số chỗ SPEC không quy định hoặc có thể hiể
 
 ## Quyết định
 
-### 1. Cách hiểu kịch bản `hold_contention.js` (đang chờ quyết định)
+### 1. Cách hiểu kịch bản `hold_contention.js` (đã chốt: `iteration`)
 
 Câu "Mỗi VU: dev-login, xem ghế, chọn 1–4 ghế trống, tạo đơn, 409 thì thử lại tối đa 3 lần" có hai cách hiểu. Script hỗ trợ cả hai qua biến `BUYER_MODE`:
 
-- `vu` (mặc định): mỗi VU là một người mua; có đơn thì dừng. Mỗi người chỉ được giữ một đơn cho mỗi sự kiện, nên nếu cùng user tiếp tục đặt sẽ gặp `ACTIVE_ORDER_EXISTS`.
-- `iteration`: mỗi vòng lặp là một người mua mới (login mới), VU đặt liên tục đến khi hết ghế.
+- `iteration` (mặc định, **chuẩn so sánh**): mỗi vòng lặp là một người mua mới (login mới), VU đặt liên tục đến khi hết ghế.
+- `vu`: mỗi VU là một người mua; có đơn thì dừng. Mỗi người chỉ được giữ một đơn cho mỗi sự kiện, nên nếu cùng user tiếp tục đặt sẽ gặp `ACTIVE_ORDER_EXISTS`.
 
-Chế độ `vu` bị giới hạn bởi tốc độ ramp, nên không làm server bão hoà được. Chế độ `iteration` dồn tải lên API giữ ghế nhiều hơn khoảng 4 lần. Cả hai đã được đo ([results.md](../results.md#baseline-pg)). **Cần chốt một chế độ làm chuẩn trước khi so sánh PG và Redis ở M2.**
+Chế độ `vu` bị giới hạn bởi tốc độ ramp, nên không làm server bão hoà được. Chế độ `iteration` dồn tải lên API giữ ghế nhiều hơn khoảng 4 lần.
+
+Review M1 đã chốt `iteration` làm chuẩn so sánh giữa các backend. Quy trình đo chuẩn là `make bench-hold BACKEND=<backend>`:
+- chạy 3 lần;
+- trước mỗi lần reset DB, flush Redis và seed lại;
+- báo cáo trung vị kèm min/max.
+
+Chế độ `vu` được giữ lại để kiểm tra hành vi của người mua thật, không dùng để so sánh.
 
 ### 2. Sơ đồ ghế của sự kiện mẫu
 
@@ -52,4 +59,4 @@ Việc tạo đơn và huỷ đơn đã ghi `order.held` và `order.cancelled` v
 ## Hệ quả
 
 - Hành vi của API có test cho từng mục (`cmd/booking/api_integration_test.go`).
-- Mục 1 ảnh hưởng trực tiếp đến số liệu so sánh ở M2, nên phải được chốt trước khi đo.
+- Mục 1 quyết định số liệu so sánh ở M2; mọi phép so sánh backend đều dùng `make bench-hold`.
