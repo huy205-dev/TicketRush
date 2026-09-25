@@ -43,6 +43,7 @@ type Config struct {
 	AdmissionTTL     time.Duration
 	AdmitInterval    time.Duration
 	AdmitBatch       int
+	ExpiryInterval   time.Duration
 	RequireAdmission bool
 	JWTSecret        string
 	AdmissionSecret  string
@@ -85,6 +86,7 @@ func Load(lookup func(string) (string, bool)) (*Config, error) {
 		AdmissionTTL:     p.duration("ADMISSION_TTL", 5*time.Minute, false),
 		AdmitInterval:    p.duration("ADMIT_INTERVAL", time.Second, false),
 		AdmitBatch:       p.positiveInt("ADMIT_BATCH", 200, math.MaxInt32),
+		ExpiryInterval:   p.duration("EXPIRY_INTERVAL", 5*time.Second, false),
 		RequireAdmission: p.boolean("REQUIRE_ADMISSION", true),
 		JWTSecret:        p.secret("JWT_SECRET"),
 		AdmissionSecret:  p.secret("ADMISSION_SECRET"),
@@ -129,6 +131,7 @@ func (c *Config) LogValue() slog.Value {
 		slog.String("admission_ttl", c.AdmissionTTL.String()),
 		slog.String("admit_interval", c.AdmitInterval.String()),
 		slog.Int("admit_batch", c.AdmitBatch),
+		slog.String("expiry_interval", c.ExpiryInterval.String()),
 		slog.Bool("require_admission", c.RequireAdmission),
 		slog.String("fakepay_url", c.FakepayURL),
 		slog.String("public_base_url", c.PublicBaseURL),
