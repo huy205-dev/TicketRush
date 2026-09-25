@@ -63,17 +63,17 @@ run-relay: .env ## Outbox relay: PostgreSQL outbox → Kafka (tạo topic nếu 
 run-expiry: .env ## Expiry worker: đơn HELD quá hạn → EXPIRED, nhả ghế
 	$(LOAD_ENV) go run ./cmd/expiry
 
-run-ticket: ## Ticket consumer
-	$(call todo,M4)
+run-ticket: .env ## Ticket consumer: order.paid → sinh QR, đơn → TICKETED
+	$(LOAD_ENV) go run ./cmd/ticket
 
-run-refunder: ## Refund consumer
-	$(call todo,M4)
+run-refunder: .env ## Refund consumer: order.refund_requested → fakepay hoàn tiền
+	$(LOAD_ENV) go run ./cmd/refunder
 
-run-notifier: ## Notifier consumer
-	$(call todo,M4)
+run-notifier: .env ## Notifier: log hoặc Telegram khi xuất vé / hoàn tiền
+	$(LOAD_ENV) go run ./cmd/notifier
 
-run-fakepay: ## Cổng thanh toán giả lập trên :8090
-	$(call todo,M4)
+run-fakepay: .env ## Cổng thanh toán giả lập trên :8090
+	$(LOAD_ENV) go run ./cmd/fakepay
 
 ## ---- Kiểm thử -------------------------------------------------------------
 
