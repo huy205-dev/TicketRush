@@ -2,9 +2,12 @@
 // keep them for 60s. 70% of buyers want VIP seats.
 //
 // BUYER_MODE picks how SPEC.md's "each VU: dev-login, view seats, ..." is read:
-//   vu (default)  each VU is one buyer: log in once, stop after one order;
-//   iteration     every iteration is a new buyer who logs in, so the VU keeps
-//                 placing orders until the event is sold out.
+//   iteration (default, the reference for backend comparisons)
+//                 every iteration is a new buyer who logs in, so the VU keeps
+//                 placing orders until the event is sold out;
+//   vu            each VU is one buyer: log in once, stop after one order.
+//                 Arrivals are capped by the ramp, so it cannot saturate the
+//                 server (see docs/adr/006).
 //
 // Each buyer:
 //   1. dev-login (once per VU, or once per iteration);
@@ -16,13 +19,15 @@
 //      because a user may hold only one order per event.
 // When nothing is available anywhere the buyer sleeps 1s and looks again.
 //
-// Run with the booking service up and a freshly seeded event:
+// Reference measurement (3 runs, fresh database each run, median and range):
+//   make bench-hold BACKEND=pg
+// Single run against an already running booking service:
 //   make db-reset seed && make run-booking   (another terminal)
 //   make load-hold
 //
 // Env: BASE_URL (default http://localhost:8080), EVENT_ID (default 1),
 //      VUS (default 2000), RAMP (default 10s), HOLD (default 60s),
-//      BUYER_MODE (vu | iteration, default vu).
+//      BUYER_MODE (iteration | vu, default iteration).
 //      Change VUS/RAMP/HOLD only for smoke runs; results use the defaults.
 import http from 'k6/http';
 import { check, sleep } from 'k6';
@@ -36,7 +41,7 @@ const RAMP = __ENV.RAMP || '10s';
 const HOLD = __ENV.HOLD || '60s';
 const VIP_SHARE = 0.7;
 const MAX_RETRIES = 3;
-const BUYER_MODE = __ENV.BUYER_MODE || 'vu';
+const BUYER_MODE = __ENV.BUYER_MODE || 'iteration';
 if (BUYER_MODE !== 'vu' && BUYER_MODE !== 'iteration') {
   throw new Error(`BUYER_MODE must be vu or iteration, got ${BUYER_MODE}`);
 }

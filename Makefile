@@ -9,7 +9,7 @@ LOAD_ENV := set -a && . ./.env && set +a &&
 # non-zero so scripts never mistake a stub for a pass.
 todo = @echo "make $@: chưa triển khai, dự kiến có ở $(1) (SPEC.md mục 12)." >&2; exit 1
 
-.PHONY: help up down ps logs migrate db-reset seed sqlc load-hold \
+.PHONY: help up down ps logs migrate db-reset seed sqlc load-hold bench-hold \
 	run-booking run-waitingroom run-relay run-expiry run-ticket run-refunder run-notifier run-fakepay \
 	test test-integration lint fmt bench invariants chaos-redis k8s-up
 
@@ -99,6 +99,12 @@ load-hold: ## k6 kịch bản mở bán; cần booking đang chạy và sự ki�
 	k6 run --summary-export=$(LOADTEST_OUT)/hold_contention-summary.json \
 		--out csv=$(LOADTEST_OUT)/hold_contention.csv.gz loadtest/hold_contention.js
 	./loadtest/peak_rps.sh $(LOADTEST_OUT)/hold_contention.csv.gz hold
+
+BACKEND ?= pg
+RUNS ?= 3
+
+bench-hold: .env ## Đo chuẩn kịch bản mở bán: RUNS lần (mặc định 3), reset DB + seed mỗi lần; BACKEND=pg|redis
+	./loadtest/bench_hold.sh $(BACKEND) $(RUNS)
 
 bench: ## seed → k6 → invariants → tóm tắt
 	$(call todo,M7)
