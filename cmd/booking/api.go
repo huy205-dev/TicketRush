@@ -160,10 +160,17 @@ func (a *api) handleGetSeats(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteErr(w, r, a.logger, err)
 		return
 	}
-	body := entry.plain
 	h := w.Header()
-	h.Set("Content-Type", "application/json; charset=utf-8")
+	h.Set("ETag", entry.etag)
 	h.Set("Vary", "Accept-Encoding")
+	// Clients may keep the map but must revalidate it before trusting it.
+	h.Set("Cache-Control", "no-cache")
+	if etagMatches(r.Header.Get("If-None-Match"), entry.etag) {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	body := entry.plain
+	h.Set("Content-Type", "application/json; charset=utf-8")
 	if acceptsGzip(r) {
 		body = entry.gzipped
 		h.Set("Content-Encoding", "gzip")
@@ -174,10 +181,10 @@ func (a *api) handleGetSeats(w http.ResponseWriter, r *http.Request) {
 }
 
 // renderSeatMap is the seat map cache's loader.
-func (a *api) renderSeatMap(ctx context.Context, eventID int64) ([]byte, error) {
+func (a *api) renderSeatMap(ctx context.Context, eventID int64) (renderedSeatMap, error) {
 	m, err := a.catalog.SeatMap(ctx, eventID)
 	if err != nil {
-		return nil, err
+		return renderedSeatMap{}, err
 	}
 	resp := seatMapResponse{Version: m.Version, Seats: make([]seatResponse, len(m.Seats))}
 	for i, s := range m.Seats {
@@ -185,9 +192,13 @@ func (a *api) renderSeatMap(ctx context.Context, eventID int64) ([]byte, error) 
 	}
 	body, err := json.Marshal(resp)
 	if err != nil {
-		return nil, fmt.Errorf("encode seat map: %w", err)
+		return renderedSeatMap{}, fmt.Errorf("encode seat map: %w", err)
 	}
-	return body, nil
+	etag := contentETag(body)
+	if m.Versioned {
+		etag = versionETag(m.Version)
+	}
+	return renderedSeatMap{body: body, etag: etag}, nil
 }
 
 // ---- orders --------------------------------------------------------------
