@@ -13,6 +13,7 @@
 # Then reports the median, min and max of every metric across the runs.
 #
 # Usage: loadtest/bench_hold.sh <pg|redis> [runs]    (or: make bench-hold BACKEND=pg)
+#        SCRIPT=loadtest/hold_contention_full.js picks the full-download scenario.
 # Output: loadtest/out/bench-hold-<backend>-<UTC time>/summary.md, plus the
 #         raw k6 summary, CSV, booking log and checks of each run.
 set -euo pipefail
@@ -38,6 +39,10 @@ set -a
 set +a
 export INVENTORY_BACKEND=$backend # after .env so it takes precedence
 export BUYER_MODE=iteration
+# SCRIPT picks the scenario: hold_contention.js (default, revalidates the seat
+# map with ETag) or hold_contention_full.js (downloads it every time).
+script=${SCRIPT:-loadtest/hold_contention.js}
+[ -f "$script" ] || { echo "no such scenario: $script" >&2; exit 2; }
 k6_params="VUS=${VUS:-2000}, RAMP=${RAMP:-10s}, HOLD=${HOLD:-60s}"
 token_count=$(( ${VUS:-2000} * 25 )) # 25 orders per VU before it runs out
 if [ -n "${VUS:-}${RAMP:-}${HOLD:-}" ]; then
@@ -146,7 +151,7 @@ for i in $(seq 1 "$runs"); do
   # /usr/bin/time -p reports the CPU time k6 itself used.
   TOKENS_FILE="$PWD/$out/run-$i-tokens.json" /usr/bin/time -p -o "$out/run-$i-k6-time.txt" \
     k6 run --summary-export="$out/run-$i-summary.json" --out csv="$out/run-$i.csv.gz" \
-    loadtest/hold_contention.js >"$out/run-$i-k6.txt" 2>&1 || k6_exit=$?
+    "$script" >"$out/run-$i-k6.txt" 2>&1 || k6_exit=$?
   booking_cpu_after=$(cpu_seconds "$booking_pid")
   kill "$sampler_pid" 2>/dev/null || true
   wait "$sampler_pid" 2>/dev/null || true
@@ -207,6 +212,8 @@ for i in $(seq 1 "$runs"); do
         created_p50_ms: $m.hold_created_ms.med, created_p99_ms: $m.hold_created_ms["p(99)"],
         conflict_p50_ms: $m.hold_seats_unavailable_ms.med, conflict_p99_ms: $m.hold_seats_unavailable_ms["p(99)"],
         tokens_exhausted: ($m.tokens_exhausted.count // 0),
+        seatmap_downloads: ($m.seatmap_downloads.count // null),
+        seatmap_not_modified: ($m.seatmap_not_modified.count // 0),
         srv_201_p50_ms: $s.orders["201"].duration_ms.p50, srv_201_p99_ms: $s.orders["201"].duration_ms.p99,
         srv_409_p50_ms: $s.orders["409"].duration_ms.p50, srv_409_p99_ms: $s.orders["409"].duration_ms.p99,
         srv_201_acquire_p99_ms: $s.orders["201"].db_acquire_ms.p99, srv_409_acquire_p99_ms: $s.orders["409"].db_acquire_ms.p99,
@@ -260,6 +267,7 @@ jq -s '
     srv_201_share_db_wait: stat(.srv_201_share_db_wait), srv_409_share_db_wait: stat(.srv_409_share_db_wait),
     pool_empty_acquires: stat(.pool_empty_acquires), pool_empty_wait_ms: stat(.pool_empty_wait_ms),
     tokens_exhausted: ([.[].tokens_exhausted] | add),
+    seatmap_downloads: stat(.seatmap_downloads), seatmap_not_modified: stat(.seatmap_not_modified),
     k6_cores: stat(.k6_cores), booking_cores: stat(.booking_cores),
     machine_busy_mean: stat(.machine_busy_mean), machine_busy_p90: stat(.machine_busy_p90),
     p99_threshold_ok_runs: ([.[] | select(.p99_threshold_ok)] | length),
@@ -271,7 +279,8 @@ jq -s '
 jq -r \
   --arg backend "$backend" --arg commit "$commit" --arg started "$started" \
   --arg machine "$machine" --arg docker_vm "$docker_vm" --arg pg "$pg_settings" \
-  --arg booking "$booking_cfg" --arg k6v "$(k6 version | head -1 | awk '{print $2}')" --arg k6p "$k6_params" --arg ncpu "$(getconf _NPROCESSORS_ONLN)" '
+  --arg booking "$booking_cfg" --arg k6v "$(k6 version | head -1 | awk '{print $2}')" --arg k6p "$k6_params" \
+  --arg ncpu "$(getconf _NPROCESSORS_ONLN)" --arg script "$script" '
   def r2: (. * 100 | round) / 100;
   def fmt: if type == "number" then (if . == (. | floor) then tostring else (r2 | tostring) end) else tostring end;
   def row(name; s): "| \(name) | \(s.median | fmt) | \(s.min | fmt) | \(s.max | fmt) |";
@@ -280,7 +289,9 @@ jq -r \
   "- Bắt đầu: \($started), commit `\($commit)`",
   "- Máy: \($machine); Docker VM: \($docker_vm)",
   "- \($pg); booking: \($booking)",
-  "- k6 \($k6v), kịch bản `loadtest/hold_contention.js`, BUYER_MODE=iteration, \($k6p); reset DB + flush Redis + seed trước mỗi lần",
+  "- k6 \($k6v), kịch bản `\($script)`, BUYER_MODE=iteration, \($k6p); reset DB + flush Redis + seed trước mỗi lần",
+  "",
+  "Số chính: latency phía server, đo trong booking cho POST /v1/orders (từ log booking, không tính mạng và hàng đợi của máy tạo tải):",
   "",
   "| Chỉ số | Trung vị | Min | Max |",
   "|---|---|---|---|",
@@ -289,26 +300,12 @@ jq -r \
   row("409 SEATS_UNAVAILABLE"; .seats_unavailable),
   row("RPS giữ ghế đỉnh (req/s)"; .peak_rps),
   row("RPS giữ ghế TB trên giây có tải (req/s)"; .mean_rps),
-  row("p50 (ms)"; .p50_ms),
-  row("p95 (ms)"; .p95_ms),
-  row("p99 (ms)"; .p99_ms),
-  row("max (ms)"; .max_ms),
-  row("Tỉ lệ lỗi"; .error_rate),
-  row("p50 request thắng (201), k6 (ms)"; .created_p50_ms),
-  row("p99 request thắng (201), k6 (ms)"; .created_p99_ms),
-  row("p50 request thua (409), k6 (ms)"; .conflict_p50_ms),
-  row("p99 request thua (409), k6 (ms)"; .conflict_p99_ms),
-  "",
-  "Phía server, từ log booking (POST /v1/orders; thời gian trong process, không tính mạng và hàng đợi của k6):",
-  "",
-  "| Chỉ số | Trung vị | Min | Max |",
-  "|---|---|---|---|",
   row("201: p50 (ms)"; .srv_201_p50_ms),
   row("201: p99 (ms)"; .srv_201_p99_ms),
-  row("201: p99 chờ pgxpool (ms)"; .srv_201_acquire_p99_ms),
-  row("201: tỉ lệ thời gian chờ pgxpool"; .srv_201_share_db_wait),
   row("409: p50 (ms)"; .srv_409_p50_ms),
   row("409: p99 (ms)"; .srv_409_p99_ms),
+  row("201: p99 chờ pgxpool (ms)"; .srv_201_acquire_p99_ms),
+  row("201: tỉ lệ thời gian chờ pgxpool"; .srv_201_share_db_wait),
   row("409: p50 chờ pgxpool (ms)"; .srv_409_acquire_p50_ms),
   row("409: p99 chờ pgxpool (ms)"; .srv_409_acquire_p99_ms),
   row("409: p99 thời gian query PG (ms)"; .srv_409_query_p99_ms),
@@ -316,6 +313,20 @@ jq -r \
   row("409: tỉ lệ thời gian chờ pgxpool"; .srv_409_share_db_wait),
   row("Số lần acquire phải chờ (pool rỗng)"; .pool_empty_acquires),
   row("Tổng thời gian chờ khi pool rỗng (ms)"; .pool_empty_wait_ms),
+  row("Tỉ lệ lỗi"; .error_rate),
+  "",
+  "Số từ k6 (k6 cùng máy, bị giới hạn CPU; chỉ để tham khảo):",
+  "",
+  "| Chỉ số | Trung vị | Min | Max |",
+  "|---|---|---|---|",
+  row("p50 (ms)"; .p50_ms),
+  row("p95 (ms)"; .p95_ms),
+  row("p99 (ms)"; .p99_ms),
+  row("max (ms)"; .max_ms),
+  row("p99 request thắng (201) (ms)"; .created_p99_ms),
+  row("p99 request thua (409) (ms)"; .conflict_p99_ms),
+  row("Sơ đồ ghế tải đầy đủ (200)"; .seatmap_downloads),
+  row("Sơ đồ ghế không đổi (304)"; .seatmap_not_modified),
   "",
   "CPU trong lúc k6 chạy (máy có \($ncpu) CPU logic; thời gian CPU chia cho thời gian thực):",
   "",
@@ -327,12 +338,12 @@ jq -r \
   row("Cả máy: % CPU bận, p90 theo giây"; .machine_busy_p90),
   "",
   "- VU hết token: \(.tokens_exhausted) lần (phải là 0, nếu không kịch bản đã bị cắt bớt)",
-  "- Ngưỡng p99 < 200 ms đạt ở \(.p99_threshold_ok_runs)/\(.runs) lần",
+  "- Ngưỡng p99 < 200 ms của k6 đạt ở \(.p99_threshold_ok_runs)/\(.runs) lần",
   "- Kiểm tra dữ liệu (loadtest/sql) không vi phạm ở \(.invariants_ok_runs)/\(.runs) lần; dòng ERROR trong log booking: \(.booking_log_errors)",
   "",
-  "| Lần | Request | 201 / 409 | Đỉnh | p50 | p95 | p99 | Lỗi | Vi phạm |",
+  "| Lần | Request | 201 / 409 | Đỉnh | Server p99 201 | Server p99 409 | k6 p99 | Lỗi | Vi phạm |",
   "|---|---|---|---|---|---|---|---|---|",
-  (.per_run[] | "| \(.run) | \(.hold_requests) | \(.created) / \(.seats_unavailable) | \(.peak_rps) | \(.p50_ms | fmt) | \(.p95_ms | fmt) | \(.p99_ms | fmt) | \(.error_rate | fmt) | \(.invariant_violations) |")
+  (.per_run[] | "| \(.run) | \(.hold_requests) | \(.created) / \(.seats_unavailable) | \(.peak_rps) | \(.srv_201_p99_ms | fmt) | \(.srv_409_p99_ms | fmt) | \(.p99_ms | fmt) | \(.error_rate | fmt) | \(.invariant_violations) |")
   ' "$out/summary.json" >"$out/summary.md"
 
 echo

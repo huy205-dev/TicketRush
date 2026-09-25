@@ -419,6 +419,13 @@ Thông tin sự kiện + danh sách khu và giá.
 ```
 `status` ∈ `AVAILABLE | HELD | SOLD`. Lấy danh sách ghế từ PostgreSQL (cache trong process, ghế không đổi), trạng thái bằng `MGET` các seat key theo lô 500. Cache toàn bộ response trong process 500 ms để giảm tải khi hàng nghìn người cùng xem.
 
+**ETag và 304** (thêm sau điều tra M2):
+- Response có `ETag` dạng weak và `Cache-Control: no-cache`, tức client được giữ bản đã tải nhưng phải hỏi lại server trước khi dùng.
+- Backend có seatmap version (Redis): `ETag: W/"v<version>"`.
+- Backend không có version (pg): `ETag: W/"h<16 ký tự hex đầu của sha256(body)>"`.
+- Request có `If-None-Match` khớp ETag hiện tại (so sánh weak) thì nhận `304 Not Modified`, không có body.
+- Version được đọc *trước* trạng thái ghế, nên bản đã render không bao giờ cũ hơn version gắn với nó; client lạc hậu tối đa bằng thời gian cache (500 ms).
+
 #### `POST /v1/orders`
 Header bắt buộc:
 - `Authorization: Bearer <user access token>`
@@ -820,14 +827,20 @@ Làm tuần tự. **Kết thúc mỗi milestone: chạy toàn bộ test, cập n
 
 | File | Mô tả |
 |---|---|
-| `hold_contention.js` | Ramp từ 0 lên 2.000 VU trong 10s, giữ 60s. 70% VU nhắm khu VIP. Mỗi VU: dev-login, xem ghế, chọn ngẫu nhiên 1–4 ghế trống, tạo đơn, nếu 409 thì thử lại tối đa 3 lần. |
+| `hold_contention.js` | Ramp từ 0 lên 2.000 VU trong 10s, giữ 60s. 70% VU nhắm khu VIP. Token tạo sẵn trước khi đo (`make_tokens.js`, gọi dev-login), nên việc đăng nhập không nằm trong tải. Mỗi vòng lặp là một người mua mới (`BUYER_MODE=iteration`): xem ghế, chọn ngẫu nhiên 1–4 ghế trống, tạo đơn, nếu 409 thì thử lại tối đa 3 lần. Mỗi VU giữ bản sơ đồ ghế đã parse và hỏi lại bằng `If-None-Match`; chỉ tải lại khi nhận 200 (mục 7.1). |
+| `hold_contention_full.js` | Giống `hold_contention.js` nhưng lần nào cũng tải và parse toàn bộ sơ đồ ghế (485 KB). Là kịch bản chuẩn cũ, giữ lại để so sánh: với 2.000 VU, k6 dùng khoảng 10/15 core cho việc này (xem `docs/results.md`, mục Điều tra M2). |
 | `single_seat.js` | 1.000 VU cùng lúc giữ đúng ghế `VIP-A-1`. Kỳ vọng đúng 1 lần `201`. |
 | `full_flow.js` | Vào hàng → chờ token → giữ ghế → thanh toán qua `/v1/payments/auto` → poll đến `TICKETED`. |
 | `webhook_storm.js` | Bật `FAKEPAY_DUPLICATE_RATE=0.5`, `FAKEPAY_LATE_RATE=0.2`, `HOLD_TTL=30s`. |
 
 Mỗi script có `thresholds` (ví dụ `http_req_duration{name:hold}: p(99)<200`) và xuất JSON tóm tắt vào `loadtest/out/`.
 
-**Lưu ý đo đạc:** chạy k6 cùng máy với hệ thống sẽ tranh CPU. Số liệu trên laptop chỉ dùng để so sánh tương đối. Số liệu chính thức chạy trên VPS riêng, ghi rõ CPU/RAM.
+**Lưu ý đo đạc:** chạy k6 cùng máy với hệ thống sẽ tranh CPU. Số liệu trên laptop chỉ dùng để so sánh tương đối. Số liệu chính thức chạy trên VPS riêng, ghi rõ CPU/RAM (một lần, ở M7).
+
+**Quy ước báo cáo** (từ điều tra M2):
+- Số chính là latency phía server, đo trong booking cho `POST /v1/orders` và tách theo 201/409. Booking ghi thời gian xử lý, thời gian chờ pgxpool, thời gian query và thời gian gọi Redis vào access log.
+- Số từ k6 được ghi kèm và đánh dấu "k6 cùng máy, bị giới hạn CPU".
+- Đo bằng `make bench-hold BACKEND=<pg|redis>`: 3 lần, mỗi lần reset DB và seed lại; báo cáo trung vị kèm min/max.
 
 ### 13.4 Bất biến (`tools/invariants`)
 

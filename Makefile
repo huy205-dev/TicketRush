@@ -104,7 +104,7 @@ load-hold: ## k6 kịch bản mở bán; cần booking đang chạy và sự ki�
 BACKEND ?= pg
 RUNS ?= 3
 
-bench-hold: .env ## Đo chuẩn kịch bản mở bán: RUNS lần (mặc định 3), reset DB + seed mỗi lần; BACKEND=pg|redis
+bench-hold: .env ## Đo chuẩn kịch bản mở bán: RUNS lần (mặc định 3), reset DB + seed mỗi lần; BACKEND=pg|redis, SCRIPT=loadtest/hold_contention_full.js
 	./loadtest/bench_hold.sh $(BACKEND) $(RUNS)
 
 bench-relay: .env ## Đo throughput outbox relay: xả 200.000 dòng lên Kafka, 3 lần
