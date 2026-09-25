@@ -1,6 +1,5 @@
-// Command booking serves the public ticketing API.
-//
-// M0 exposes only /healthz and /readyz; the booking endpoints arrive in M1.
+// Command booking serves the public ticketing API: dev-login, events and
+// seat maps, and creating, reading and cancelling orders.
 package main
 
 import (
@@ -18,7 +17,11 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/huy205-dev/ticketrush/internal/auth"
+	"github.com/huy205-dev/ticketrush/internal/catalog"
 	"github.com/huy205-dev/ticketrush/internal/httpx"
+	"github.com/huy205-dev/ticketrush/internal/inventory"
+	"github.com/huy205-dev/ticketrush/internal/order"
 	"github.com/huy205-dev/ticketrush/internal/platform/config"
 	"github.com/huy205-dev/ticketrush/internal/platform/httpserver"
 	"github.com/huy205-dev/ticketrush/internal/platform/logging"
@@ -63,6 +66,10 @@ func run(ctx context.Context, lookupEnv func(string) (string, bool), stdout io.W
 		}
 		return err
 	}
+	if err := checkSupported(cfg); err != nil {
+		logger.Error("unsupported configuration", "err", err)
+		return err
+	}
 
 	pool, err := postgres.NewPool(ctx, cfg.DatabaseURL, cfg.DBMaxConns)
 	if err != nil {
@@ -79,8 +86,14 @@ func run(ctx context.Context, lookupEnv func(string) (string, bool), stdout io.W
 		httpx.Check{Name: "redis", Fn: func(ctx context.Context) error { return rdb.Ping(ctx).Err() }},
 	)
 
+	inv := inventory.NewPG(pool)
+	cat := catalog.NewService(pool, inv)
+	orders := order.NewService(pool, cat, inv, cfg.HoldTTL, cfg.HoldGrace, logger)
+	tokens := auth.NewTokens(cfg.JWTSecret, auth.AccessTokenTTL)
+	api := newAPI(logger, pool, tokens, cat, orders, cfg.IsDev())
+
 	srv := &http.Server{
-		Handler:           newRouter(logger, health),
+		Handler:           newRouter(logger, health, api),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      15 * time.Second,
@@ -102,7 +115,19 @@ func run(ctx context.Context, lookupEnv func(string) (string, bool), stdout io.W
 	return nil
 }
 
-func newRouter(logger *slog.Logger, health *httpx.Health) http.Handler {
+// checkSupported rejects settings whose implementation belongs to a later
+// milestone, rather than silently running without them.
+func checkSupported(cfg *config.Config) error {
+	if cfg.InventoryBackend != config.BackendPG {
+		return fmt.Errorf("INVENTORY_BACKEND=%s is not implemented yet (M2); set INVENTORY_BACKEND=pg", cfg.InventoryBackend)
+	}
+	if cfg.RequireAdmission {
+		return errors.New("REQUIRE_ADMISSION=true needs the waiting room (M5); set REQUIRE_ADMISSION=false")
+	}
+	return nil
+}
+
+func newRouter(logger *slog.Logger, health *httpx.Health, api *api) http.Handler {
 	r := chi.NewRouter()
 	r.Use(
 		httpx.RequestID,
@@ -114,5 +139,6 @@ func newRouter(logger *slog.Logger, health *httpx.Health) http.Handler {
 
 	r.Get("/healthz", health.Live)
 	r.Get("/readyz", health.Ready)
+	api.routes(r)
 	return r
 }
