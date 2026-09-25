@@ -2,7 +2,12 @@
 
 Chỉ ghi kết quả từ lần chạy thật. Mỗi lần đo ghi: ngày, commit hash, cấu hình máy, kịch bản, RPS, p50/p95/p99, tỉ lệ lỗi, kết quả invariants, ghi chú thay đổi so với lần trước.
 
-Số liệu chạy k6 cùng máy với hệ thống chỉ dùng để so sánh tương đối (k6 tranh CPU với service). Số liệu chính thức chạy trên VPS riêng.
+Số liệu chạy k6 cùng máy với hệ thống chỉ dùng để so sánh tương đối (k6 tranh CPU với service). Số liệu chính thức chạy trên VPS riêng (một lần, ở M7, với code hoàn chỉnh).
+
+**Quy ước từ sau điều tra M2:**
+- Số chính là latency phía server: đo trong booking cho `POST /v1/orders`, tách theo 201 (request thắng) và 409 (request thua), lấy từ access log.
+- Số từ k6 được ghi kèm, đánh dấu *"k6 cùng máy, bị giới hạn CPU"*.
+- Các mục đo trước quy ước này (Baseline PG, So sánh PG và Redis) vẫn giữ nguyên như đã ghi. Chúng chỉ có số từ k6.
 
 ## Quy trình đo chuẩn
 
@@ -206,6 +211,65 @@ Bỏ dev-login khỏi tải làm tăng RPS đỉnh và giảm p50, nhưng không
 4. **Chưa làm bước 2** (sửa luồng SPEC 9.1 để request thua không chạm PostgreSQL), vì số liệu không xác nhận điều kiện đặt ra. Nếu làm, theo số trên thì phía server chỉ bớt được khoảng 1 truy vấn cho mỗi request thua (p99 chờ pool khoảng 10 ms với 20 kết nối), không đủ để thay đổi p99 phía k6 trong cách đo hiện tại.
 
 Quan sát phụ, chưa kết luận: Redis lưu snapshot RDB (`save 60 10000` mặc định) trong mỗi lần đo, mỗi lần fork khoảng 15–20 ms.
+
+## Kịch bản ETag: đo lại PG và Redis
+
+2026-09-25, commit `8aa4611`. Theo quyết định sau điều tra M2:
+- `GET /v1/events/{id}/seats` có ETag và trả `304` khi sơ đồ không đổi (SPEC 7.1);
+- `hold_contention.js` giữ bản sơ đồ đã parse của mỗi VU và chỉ tải lại khi nhận `200`;
+- kịch bản cũ được giữ lại dưới tên `hold_contention_full.js`.
+
+Đo bằng `make bench-hold`: 3 lần mỗi cấu hình, `DB_MAX_CONNS=20`, cùng máy và cùng cấu hình như các mục trên. Số là trung vị [min–max].
+
+### Số chính: latency phía server (trong booking)
+
+| Chỉ số | PG | Redis | Redis so với PG |
+|---|---|---|---|
+| Request giữ ghế | 15.768 [14.137–15.806] | 14.901 [14.761–15.161] | |
+| 201 / 409 | 2.430 / 13.345 | 2.446 / 12.455 | |
+| RPS giữ ghế đỉnh | 2.048 [2.044–2.244] | **4.038** [3.733–4.186] | +97% |
+| RPS giữ ghế TB trên giây có tải | 1.434 [1.414–1.437] | 2.952 [2.484–3.032] | |
+| **409: p50** | 513,8 ms [387,7–572,3] | **9,9 ms** [6,6–11,4] | −98% |
+| **409: p99** | 1.019,8 ms [941,9–1.146,3] | **207,5 ms** [203,8–219,4] | −80% |
+| **201: p50** | 343,9 ms [304,1–447,1] | **37,3 ms** [32,4–42,2] | −89% |
+| **201: p99** | 1.066,2 ms [843,8–1.198,4] | **237,6 ms** [129,6–254,4] | −78% |
+| 409: p99 chờ pgxpool | 1.012,1 ms | 73,6 ms [61,2–93,8] | |
+| 409: tỉ lệ thời gian chờ pgxpool | 97% | 60% [59–63%] | |
+| 409: p99 query PG / p99 Redis | 85,9 / 4,5 ms | 4,2 / 201,3 ms | |
+| Lần acquire phải chờ vì pool rỗng (mỗi lần chạy) | 33.640 | 11.652 | |
+| Lỗi / kiểm tra dữ liệu | 0% / 3/3 đạt | 0% / 3/3 đạt | |
+
+Số từ k6 (*k6 cùng máy, bị giới hạn CPU*):
+
+| | PG | Redis |
+|---|---|---|
+| p50 / p95 / p99 | 440,6 / 905,0 / 1.019,0 ms | 32,6 / 158,8 / 346,8 ms |
+| Sơ đồ ghế tải đầy đủ (200) / không đổi (304), mỗi lần chạy | 6.363 / 121.146 | 4.503 / 128.739 |
+| CPU: k6 / booking / cả máy (TB) | 1,28 core / 0,28 core / 24% | 1,11 core / 0,24 core / 21% |
+
+### So sánh với kịch bản cũ và chẩn đoán pool, backend Redis
+
+| Chỉ số | `hold_contention_full.js`, 20 kết nối | `hold_contention.js`, 20 kết nối | `hold_contention.js`, 80 kết nối (chẩn đoán) |
+|---|---|---|---|
+| CPU của k6 | 10,0 core | 1,11 core | 1,11 core |
+| RPS giữ ghế đỉnh | 2.819 [2.620–3.176] | 4.038 [3.733–4.186] | 4.062 [3.988–4.592] |
+| Server: 409 p50 / p99 | 1,9 / 26,9 ms | 9,9 / 207,5 ms | 3,4 / 210,1 ms |
+| Server: 201 p50 / p99 | 17,9 / 80,3 ms | 37,3 / 237,6 ms | 30,2 / 262,0 ms |
+| Server: 409, tỉ lệ thời gian chờ pgxpool | 26% | 60% | 7% |
+| Server: 409, p99 chờ pgxpool | 19,0 ms | 73,6 ms | 20,6 ms |
+| Server: 409, p99 query PG / p99 Redis | 3,7 / 10,5 ms | 4,2 / 201,3 ms | 200,8 / 206,9 ms |
+| k6: p99 (*k6 cùng máy, bị giới hạn CPU*) | 1.100 ms | 347 ms | 407 ms |
+
+Dữ liệu thô: [`docs/results/2026-09-25-seatmap-etag/`](results/2026-09-25-seatmap-etag/).
+
+### Nhận xét
+
+- **ETag gỡ được nút thắt ở máy tạo tải.** k6 giảm từ 10 core xuống khoảng 1,1 core (cả máy bận khoảng 20%). Mỗi VU tải lại sơ đồ khoảng 4.500 lần mỗi lần chạy, còn lại khoảng 129.000 lần nhận `304`. Tải thực đến booking tăng: RPS đỉnh với Redis từ 2.819 lên 4.038.
+- **Redis nhanh hơn PG rõ rệt khi đo phía server:** p50 của request thua giảm 98% (514 → 9,9 ms), p99 giảm 80%.
+- **Khi máy tạo tải không còn là nút cổ chai, request thua giờ chờ PostgreSQL phần lớn thời gian.** Với 20 kết nối, 60% thời gian phía server của request 409 là chờ pgxpool (p99 74 ms). Kết luận của Điều tra M2 ("chờ PostgreSQL không đáng kể") chỉ đúng với kịch bản cũ, khi tải thực đến booking bị k6 kìm lại.
+- **Tăng pool lên 80 kết nối** giảm phần chờ này xuống 7% và p50 của 409 từ 9,9 xuống 3,4 ms. Tuy vậy p99 của 409 vẫn khoảng 210 ms.
+- **Các lần khựng khoảng 200 ms chưa giải thích được.** Chúng xuất hiện ở cả lệnh Redis (p99 207 ms) lẫn query PG (p99 201 ms, cấu hình 80 kết nối). Giả thuyết TCP retransmit (thời gian chờ tối thiểu trước khi gửi lại gói trên Linux là 200 ms) đã bị bác bỏ: bộ đếm `RetransSegs` và `TCPTimeouts` trong cả container PostgreSQL lẫn Redis đều bằng 0 sau mọi lần đo. Sẽ kiểm tra lại trên VPS ở M7, nơi không có lớp mạng ảo của OrbStack.
+- **Một số VU dùng hết 25 token** (35 lần ở Redis, 14 ở PG, 18 ở cấu hình 80 kết nối). Khi kịch bản chạy nhanh hơn, các VU khởi động sớm đặt được nhiều đơn hơn và dừng khi hết token, nên tải cuối lần chạy bị cắt bớt một chút.
 
 ## Outbox relay
 

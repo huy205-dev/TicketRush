@@ -1,0 +1,9 @@
+info:orders|2446
+info:seats_in_held_orders|5000
+seat_in_two_held_orders|0
+order_total_mismatch|0
+order_without_held_event|0
+info:redis_seat_keys|5000
+info:pg_expected_keys|5000
+redis_key_not_in_pg|0
+pg_state_missing_in_redis|0

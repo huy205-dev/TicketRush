@@ -1,0 +1,309 @@
+{
+  "runs": 3,
+  "hold_requests": {
+    "median": 15331,
+    "min": 15184,
+    "max": 16180
+  },
+  "created": {
+    "median": 2494,
+    "min": 2477,
+    "max": 2500
+  },
+  "seats_unavailable": {
+    "median": 12854,
+    "min": 12690,
+    "max": 13680
+  },
+  "peak_rps": {
+    "median": 4062,
+    "min": 3988,
+    "max": 4592
+  },
+  "mean_rps": {
+    "median": 2555.2,
+    "min": 2169.1,
+    "max": 2696.7
+  },
+  "p50_ms": {
+    "median": 17.173000000000002,
+    "min": 16.6575,
+    "max": 21.816
+  },
+  "p95_ms": {
+    "median": 224.99664999999993,
+    "min": 204.66140000000001,
+    "max": 236.2734999999998
+  },
+  "p99_ms": {
+    "median": 406.7929199999999,
+    "min": 325.74971,
+    "max": 526.9093999999999
+  },
+  "max_ms": {
+    "median": 1657.007,
+    "min": 1048.461,
+    "max": 4551.487
+  },
+  "error_rate": {
+    "median": 0,
+    "min": 0,
+    "max": 0
+  },
+  "created_p50_ms": {
+    "median": 48.2225,
+    "min": 44.593,
+    "max": 50.439
+  },
+  "created_p99_ms": {
+    "median": 439.61345999999986,
+    "min": 376.37715999999995,
+    "max": 443.69816
+  },
+  "conflict_p50_ms": {
+    "median": 14.3405,
+    "min": 13.212499999999999,
+    "max": 18.3405
+  },
+  "conflict_p99_ms": {
+    "median": 407.56228999999985,
+    "min": 317.64764999999994,
+    "max": 581.3921299999998
+  },
+  "srv_201_p50_ms": {
+    "median": 30.168,
+    "min": 24.201,
+    "max": 31.287
+  },
+  "srv_201_p99_ms": {
+    "median": 261.961,
+    "min": 248.921,
+    "max": 316.605
+  },
+  "srv_409_p50_ms": {
+    "median": 3.403,
+    "min": 3.049,
+    "max": 3.834
+  },
+  "srv_409_p99_ms": {
+    "median": 210.087,
+    "min": 208.445,
+    "max": 218.893
+  },
+  "srv_201_acquire_p99_ms": {
+    "median": 47.498,
+    "min": 29.606,
+    "max": 55.07
+  },
+  "srv_409_acquire_p50_ms": {
+    "median": 0,
+    "min": 0,
+    "max": 0
+  },
+  "srv_409_acquire_p99_ms": {
+    "median": 20.585,
+    "min": 12.984,
+    "max": 22.1
+  },
+  "srv_409_query_p99_ms": {
+    "median": 200.785,
+    "min": 4.972,
+    "max": 201.138
+  },
+  "srv_409_redis_p99_ms": {
+    "median": 206.853,
+    "min": 204.729,
+    "max": 208.101
+  },
+  "srv_201_share_db_wait": {
+    "median": 0.06887993397829816,
+    "min": 0.03926314898343358,
+    "max": 0.10996207652255519
+  },
+  "srv_409_share_db_wait": {
+    "median": 0.0697591386759589,
+    "min": 0.03438197226978908,
+    "max": 0.08448799117061281
+  },
+  "pool_empty_acquires": {
+    "median": 2330,
+    "min": 1566,
+    "max": 2793
+  },
+  "pool_empty_wait_ms": {
+    "median": 20114.068000000003,
+    "min": 11516.821000000002,
+    "max": 30210.992
+  },
+  "tokens_exhausted": 18,
+  "seatmap_downloads": {
+    "median": 4258,
+    "min": 4080,
+    "max": 4799
+  },
+  "seatmap_not_modified": {
+    "median": 129788,
+    "min": 129010,
+    "max": 129875
+  },
+  "k6_cores": {
+    "median": 1.11,
+    "min": 1.11,
+    "max": 1.11
+  },
+  "booking_cores": {
+    "median": 0.24,
+    "min": 0.24,
+    "max": 0.24
+  },
+  "machine_busy_mean": {
+    "median": 19.7,
+    "min": 19.0,
+    "max": 22.0
+  },
+  "machine_busy_p90": {
+    "median": 25.6,
+    "min": 22.7,
+    "max": 25.9
+  },
+  "p99_threshold_ok_runs": 0,
+  "invariants_ok_runs": 3,
+  "booking_log_errors": 0,
+  "per_run": [
+    {
+      "run": 1,
+      "hold_requests": 15184,
+      "created": 2494,
+      "seats_unavailable": 12690,
+      "other_errors": 0,
+      "peak_rps": 4062,
+      "mean_rps": 2169.1,
+      "p50_ms": 16.6575,
+      "p95_ms": 204.66140000000001,
+      "p99_ms": 406.7929199999999,
+      "max_ms": 4551.487,
+      "error_rate": 0,
+      "p99_threshold_ok": false,
+      "all_requests": 149053,
+      "created_p50_ms": 48.2225,
+      "created_p99_ms": 376.37715999999995,
+      "conflict_p50_ms": 13.212499999999999,
+      "conflict_p99_ms": 407.56228999999985,
+      "tokens_exhausted": 6,
+      "seatmap_downloads": 4080,
+      "seatmap_not_modified": 129788,
+      "srv_201_p50_ms": 30.168,
+      "srv_201_p99_ms": 248.921,
+      "srv_409_p50_ms": 3.049,
+      "srv_409_p99_ms": 208.445,
+      "srv_201_acquire_p99_ms": 47.498,
+      "srv_409_acquire_p99_ms": 22.1,
+      "srv_409_acquire_p50_ms": 0,
+      "srv_409_query_p99_ms": 4.972,
+      "srv_409_redis_p99_ms": 204.729,
+      "srv_409_share_db_wait": 0.08448799117061281,
+      "srv_201_share_db_wait": 0.06887993397829816,
+      "pool_empty_acquires": 2330,
+      "pool_empty_wait_ms": 20114.068000000003,
+      "pool_acquires": 67683,
+      "k6_cores": 1.11,
+      "booking_cores": 0.24,
+      "machine_busy_mean": 19.7,
+      "machine_busy_p90": 25.9,
+      "orders": 2494,
+      "invariant_violations": 0,
+      "booking_log_errors": 0,
+      "k6_exit": 99
+    },
+    {
+      "run": 2,
+      "hold_requests": 16180,
+      "created": 2500,
+      "seats_unavailable": 13680,
+      "other_errors": 0,
+      "peak_rps": 4592,
+      "mean_rps": 2696.7,
+      "p50_ms": 17.173000000000002,
+      "p95_ms": 224.99664999999993,
+      "p99_ms": 325.74971,
+      "max_ms": 1048.461,
+      "error_rate": 0,
+      "p99_threshold_ok": false,
+      "all_requests": 150314,
+      "created_p50_ms": 44.593,
+      "created_p99_ms": 439.61345999999986,
+      "conflict_p50_ms": 14.3405,
+      "conflict_p99_ms": 317.64764999999994,
+      "tokens_exhausted": 7,
+      "seatmap_downloads": 4258,
+      "seatmap_not_modified": 129875,
+      "srv_201_p50_ms": 24.201,
+      "srv_201_p99_ms": 261.961,
+      "srv_409_p50_ms": 3.403,
+      "srv_409_p99_ms": 210.087,
+      "srv_201_acquire_p99_ms": 29.606,
+      "srv_409_acquire_p99_ms": 12.984,
+      "srv_409_acquire_p50_ms": 0,
+      "srv_409_query_p99_ms": 200.785,
+      "srv_409_redis_p99_ms": 206.853,
+      "srv_409_share_db_wait": 0.03438197226978908,
+      "srv_201_share_db_wait": 0.03926314898343358,
+      "pool_empty_acquires": 1566,
+      "pool_empty_wait_ms": 11516.821000000002,
+      "pool_acquires": 68685,
+      "k6_cores": 1.11,
+      "booking_cores": 0.24,
+      "machine_busy_mean": 22.0,
+      "machine_busy_p90": 25.6,
+      "orders": 2500,
+      "invariant_violations": 0,
+      "booking_log_errors": 0,
+      "k6_exit": 99
+    },
+    {
+      "run": 3,
+      "hold_requests": 15331,
+      "created": 2477,
+      "seats_unavailable": 12854,
+      "other_errors": 0,
+      "peak_rps": 3988,
+      "mean_rps": 2555.2,
+      "p50_ms": 21.816,
+      "p95_ms": 236.2734999999998,
+      "p99_ms": 526.9093999999999,
+      "max_ms": 1657.007,
+      "error_rate": 0,
+      "p99_threshold_ok": false,
+      "all_requests": 149141,
+      "created_p50_ms": 50.439,
+      "created_p99_ms": 443.69816,
+      "conflict_p50_ms": 18.3405,
+      "conflict_p99_ms": 581.3921299999998,
+      "tokens_exhausted": 5,
+      "seatmap_downloads": 4799,
+      "seatmap_not_modified": 129010,
+      "srv_201_p50_ms": 31.287,
+      "srv_201_p99_ms": 316.605,
+      "srv_409_p50_ms": 3.834,
+      "srv_409_p99_ms": 218.893,
+      "srv_201_acquire_p99_ms": 55.07,
+      "srv_409_acquire_p99_ms": 20.585,
+      "srv_409_acquire_p50_ms": 0,
+      "srv_409_query_p99_ms": 201.138,
+      "srv_409_redis_p99_ms": 208.101,
+      "srv_409_share_db_wait": 0.0697591386759589,
+      "srv_201_share_db_wait": 0.10996207652255519,
+      "pool_empty_acquires": 2793,
+      "pool_empty_wait_ms": 30210.992,
+      "pool_acquires": 67813,
+      "k6_cores": 1.11,
+      "booking_cores": 0.24,
+      "machine_busy_mean": 19.0,
+      "machine_busy_p90": 22.7,
+      "orders": 2477,
+      "invariant_violations": 0,
+      "booking_log_errors": 0,
+      "k6_exit": 99
+    }
+  ]
+}

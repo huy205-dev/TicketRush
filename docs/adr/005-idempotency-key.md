@@ -107,3 +107,45 @@ Các test dưới đây chạy trên PostgreSQL và Redis thật, cho cả hai b
   - 200 goroutine tranh khoá thì đúng 1 goroutine lấy được;
   - người giữ khoá đã hết hạn không xoá được khoá của người mới;
   - Redis không chạy thì trả lỗi.
+
+## Phương án đã cân nhắc và không chọn (điều tra M2, 2026-09-25)
+
+### Đề xuất
+
+Sửa luồng SPEC 9.1 để request bị Redis từ chối không chạm PostgreSQL:
+
+- `orderId` tất định: `UUIDv5(namespace, userId + ":" + idempotencyKey)`;
+- bỏ bước tra PostgreSQL theo `(user_id, idempotency_key)` trước khi giữ ghế;
+- chỉ khi `hold.lua` báo ghế bị chiếm *và* mọi ghế đó đều mang đúng `orderId` của mình, mới coi là request gửi lại và đọc PostgreSQL để trả `200`.
+
+Mình có cân nhắc thêm một biến thể: đặt một dấu "đã xong" trong Redis (`idem:<userId>:<key>:done`, lưu hash) ngay trong script lấy khoá và nhả khoá. Nhờ vậy vẫn nhận ra được request gửi lại cho đơn đã `CANCELLED` hoặc `EXPIRED` mà ghế đã về tay người khác, trường hợp mà riêng `orderId` tất định sẽ trả nhầm `409`.
+
+### Số liệu phía server
+
+Đo trong booking, backend Redis, 3 lần mỗi cấu hình, trung vị (chi tiết ở [results.md](../results.md#kịch-bản-etag-đo-lại-pg-và-redis)):
+
+| Request 409 | Kịch bản cũ, 20 kết nối | Kịch bản ETag, 20 kết nối | Kịch bản ETag, 80 kết nối |
+|---|---|---|---|
+| p50 / p99 | 1,9 / 26,9 ms | 9,9 / 207,5 ms | 3,4 / 210,1 ms |
+| p99 chờ pgxpool | 19,0 ms | 73,6 ms | 20,6 ms |
+| Tỉ lệ thời gian chờ pgxpool | 26% | 60% | 7% |
+| RPS giữ ghế đỉnh | 2.819 | 4.038 | 4.062 |
+
+- Kịch bản cũ (`hold_contention_full.js`) bị giới hạn bởi CPU của k6, nên tải thực đến booking thấp và phần chờ PostgreSQL có vẻ nhỏ. Đây là số liệu mà Điều tra M2 dựa vào.
+- Với kịch bản ETag, tải đến booking tăng khoảng 40%, và **60% thời gian của request thua là chờ pgxpool**.
+- Chỉ tăng pool lên 80 kết nối thì phần chờ này giảm còn 7%. p99 còn khoảng 210 ms do các lần khựng khoảng 200 ms ở cả Redis lẫn PostgreSQL, chưa giải thích được và không liên quan đến luồng tạo đơn.
+- Lợi ích tối đa của đề xuất: bớt một truy vấn PostgreSQL cho mỗi request 409 (khoảng 12.000 truy vấn cho một lần mở bán 5.000 ghế).
+
+### Lý do không chọn
+
+1. **Phần lớn thời gian chờ đã loại được mà không cần đổi luồng**, chỉ bằng cách tăng `DB_MAX_CONNS`. Đó là thay đổi cấu hình, không đụng tới thiết kế.
+2. **Đổi thiết kế và SPEC:**
+   - `orders.id` không còn là UUIDv7, nên mất tính tăng dần theo thời gian của khoá chính;
+   - `hold.lua` phải trả về cả chủ của ghế bị chiếm;
+   - nhả ghế khi xung đột phải trừ đi các ghế thuộc đơn cũ cùng `orderId`, nếu không sẽ nhả nhầm ghế của đơn thật.
+3. **Ngữ nghĩa idempotency yếu hơn khi thiếu dấu "đã xong".**
+   - Gửi lại một đơn đã huỷ hoặc hết hạn mà ghế đã về tay người khác sẽ nhận `409` thay vì `200`.
+   - Dùng lại key với body khác, khi ghế mới bị người khác giữ, sẽ nhận `409` thay vì `422`.
+   - Thêm dấu "đã xong" thì sửa được, nhưng lại thêm trạng thái trong Redis cần giữ nhất quán và dọn dẹp.
+
+Quyết định (review M2): **không làm**. Số liệu của kịch bản ETag (60% thời gian request thua là chờ pgxpool khi dùng 20 kết nối) được báo lại để xem xét cùng với việc tăng `DB_MAX_CONNS` mặc định. Việc đó thay đổi SPEC mục 11, nên cần quyết định riêng. Sẽ xem lại cả hai trên VPS ở M7.

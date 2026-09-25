@@ -47,23 +47,24 @@ PostgreSQL là nguồn sự thật; Redis chỉ giữ trạng thái tạm và d�
 Đo bằng `make bench-hold BACKEND=<pg|redis>`:
 - 3 lần mỗi backend, mỗi lần reset DB và seed lại;
 - kịch bản mở bán 2.000 VU, mỗi vòng lặp là một người mua mới;
-- cả hai backend chạy cùng commit (`0cc0197`), trên MacBook Apple M5 Pro 24 GiB, k6 chạy cùng máy, nên chỉ để so sánh tương đối.
+- sơ đồ ghế được hỏi lại bằng ETag;
+- commit `8aa4611`, trên MacBook Apple M5 Pro 24 GiB.
 
-Chi tiết và nhận xét ở [docs/results.md](docs/results.md#so-sánh-pg-và-redis).
+**Số chính là latency phía server** (đo trong booking cho `POST /v1/orders`), trung vị [min–max]. Chi tiết ở [docs/results.md](docs/results.md#kịch-bản-etag-đo-lại-pg-và-redis).
 
-| Backend (trung vị [min–max]) | RPS giữ ghế đỉnh | p50 | p95 | p99 | Lỗi | Ghế bán trùng |
-|---|---|---|---|---|---|---|
-| pg | 2.070 [1.762–2.154] | 462 ms [446–489] | 974 ms [728–1.035] | 1.062 ms [959–1.115] | 0% | 0 |
-| redis | **2.901** [2.775–2.971] | **48 ms** [44–63] | **502 ms** [454–542] | 958 ms [765–1.100] | 0% | 0 |
+| Backend | RPS giữ ghế đỉnh | 409 p50 | 409 p99 | 201 p50 | 201 p99 | Lỗi | Ghế bán trùng |
+|---|---|---|---|---|---|---|---|
+| pg | 2.048 [2.044–2.244] | 514 ms | 1.020 ms | 344 ms | 1.066 ms | 0% | 0 |
+| redis | **4.038** [3.733–4.186] | **9,9 ms** | **208 ms** | **37 ms** | **238 ms** | 0% | 0 |
 
-Redis: đỉnh +40%, p50 −90%, p95 −48%, nhưng p99 chỉ −10%. Vẫn chưa đạt mục tiêu ≥ 5.000 req/s và p99 < 200 ms.
+- p99 phía k6 (*k6 cùng máy, bị giới hạn CPU*): pg 1.019 ms, redis 347 ms.
+- Với Redis và 20 kết nối, request thua dành 60% thời gian chờ pool PostgreSQL. Tăng lên 80 kết nối thì giảm còn 7%.
+- Còn các lần khựng khoảng 200 ms ở cả Redis lẫn PostgreSQL chưa giải thích được; sẽ đo lại trên VPS ở M7.
+- Vẫn chưa đạt mục tiêu ≥ 5.000 req/s và p99 < 200 ms.
 
-[Điều tra M2](docs/results.md#điều-tra-m2) cho thấy p99 khoảng 1 s là do **máy tạo tải bị bão hoà**:
-- k6 chạy cùng máy, dùng khoảng 10/15 core để parse sơ đồ ghế;
-- booking chỉ dùng khoảng 0,25 core, và p99 phía server của request thua chỉ khoảng 15–30 ms;
-- tăng pool PostgreSQL từ 20 lên 80 xoá hết thời gian chờ kết nối nhưng không làm p99 phía k6 giảm.
+[Điều tra M2](docs/results.md#điều-tra-m2): trước khi có ETag, k6 dùng khoảng 10/15 core để parse sơ đồ ghế 485 KB ở mỗi vòng lặp, làm p99 đo được lên khoảng 1 s. Kịch bản cũ được giữ trong `loadtest/hold_contention_full.js`.
 
-Outbox relay (`make bench-relay`): xả 200.000 sự kiện lên Redpanda với trung vị **101.085 sự kiện/s** [81.682–106.001]. Relay không phải điểm nghẽn ([chi tiết](docs/results.md#outbox-relay)).
+Outbox relay (`make bench-relay`): xả 200.000 sự kiện lên Redpanda với trung vị **101.085 sự kiện/s** ([chi tiết](docs/results.md#outbox-relay)).
 
 ## Quyết định kỹ thuật
 
@@ -81,7 +82,7 @@ Danh sách đầy đủ ở [docs/adr/](docs/adr/README.md).
 |---|---|---|
 | POST | `/v1/auth/dev-login` | `{"user_id": 123}` → JWT 24 h. Chỉ bật khi `APP_ENV=dev` |
 | GET | `/v1/events/{id}` | Thông tin sự kiện, các khu và giá |
-| GET | `/v1/events/{id}/seats` | 5.000 ghế kèm trạng thái và `version`; cache 500 ms, gzip |
+| GET | `/v1/events/{id}/seats` | 5.000 ghế kèm trạng thái và `version`; cache 500 ms, gzip; `ETag` + `If-None-Match` → `304` |
 | POST | `/v1/orders` | Cần `Authorization` và `Idempotency-Key` (UUID). 201 tạo mới, 200 gửi lại, 409 `IDEMPOTENCY_KEY_IN_PROGRESS` khi request cùng key đang chạy |
 | GET | `/v1/orders/{id}` | Chỉ chủ đơn xem được |
 | POST | `/v1/orders/{id}/cancel` | Chỉ khi `HELD`; huỷ lại đơn đã huỷ vẫn trả 200 |
