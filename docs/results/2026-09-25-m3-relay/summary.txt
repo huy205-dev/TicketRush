@@ -1,0 +1,2 @@
+bench-relay: 200000 rows, 3 runs, commit e18f5ce
+rows/s median 101085, min 81682, max 106001

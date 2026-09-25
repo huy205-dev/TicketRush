@@ -128,6 +128,30 @@ Dữ liệu thô: [`docs/results/2026-09-25-m2-pg-bench-hold/`](results/2026-09-
 - **Vẫn chưa đạt mục tiêu** ≥ 5.000 req/s và p99 < 200 ms ở cả hai backend.
 - **Chi phí của khoá idempotency** lên backend PG, so với baseline M1 (commit `99d3e6d`): RPS đỉnh 2.070 so với 2.124, p50 462 ms so với 399 ms, p99 1.062 ms so với 971 ms. Mức chênh này nằm trong độ dao động quan sát được giữa các lần đo, nên chưa thể tách riêng ảnh hưởng của khoá.
 
+## Outbox relay
+
+2026-09-25, commit `e18f5ce` (M3), `make bench-relay` (script [`loadtest/bench_relay.sh`](../loadtest/bench_relay.sh)). Mỗi lần chạy:
+- reset DB rồi chèn thẳng 200.000 dòng outbox, mỗi dòng có payload JSON khoảng 250 byte giống sự kiện đơn hàng thật;
+- khởi động relay và đo thời gian đến khi không còn dòng nào có `published_at IS NULL`, kiểm tra mỗi 100 ms.
+
+Thời gian đo tính cả lúc relay khởi động (kết nối, kiểm tra topic) và độ trễ tối đa 100 ms của bước kiểm tra, nên con số là cận dưới.
+
+- Máy như mục Baseline PG. Redpanda v26.2.3 trong compose: `--smp 1 --memory 1G --mode dev-container`; chế độ này bỏ qua fsync, nên throughput cao hơn một cụm thật.
+- Relay: lô 500 dòng, `ProduceSync` với producer idempotent, `acks=all`.
+
+| Lần | Thời gian | Dòng/s |
+|---|---|---|
+| 1 | 2,449 s | 81.682 |
+| 2 | 1,979 s | 101.085 |
+| 3 | 1,887 s | 106.001 |
+| **Trung vị [min–max]** | | **101.085** [81.682–106.001] |
+
+- Tổng high watermark của `orders.v1` tăng đúng 600.000 sau 3 lần, tức mọi dòng được đánh dấu đã gửi đều thực sự nằm trên Kafka.
+- Lần 1 chậm nhất (khởi động nguội).
+- Throughput này cao hơn nhu cầu nhiều bậc: khi mở bán, backend Redis tạo khoảng 2.400 đơn trong 12–16 giây, mỗi đơn một sự kiện `order.held`.
+
+Dữ liệu thô: [`docs/results/2026-09-25-m3-relay/`](results/2026-09-25-m3-relay/).
+
 ## Tìm và sửa điểm nghẽn
 
 Chưa đo (M7).
