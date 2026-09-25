@@ -12,6 +12,23 @@ Mỗi lỗi khó gặp phải được ghi theo mẫu dưới đây, mới nhấ
 **Bài học:**
 ```
 
+## 2026-09-25 — Consumer Kafka treo mãi khi dừng (franz-go `BlockRebalanceOnPoll`)
+
+**Triệu chứng:** test e2e saga ở M4 chạy đúng hết phần nghiệp vụ (đơn TICKETED, 2 lần hoàn tiền, 3 thông báo), nhưng sau khi cancel context thì `kafka.Run` của notifier không trả về trong 15 s. Nếu không phát hiện, mọi consumer (ticket, refunder, notifier) sẽ treo khi nhận SIGTERM cho đến khi bị kill.
+
+**Cách điều tra:**
+1. Luồng dừng: `Consume` trả về khi `PollFetches(ctx)` trả về vì ctx bị huỷ, rồi `defer cl.Close()` trong `Run`. Nghi `Close` bị chặn.
+2. Đọc mã franz-go v1.22.0:
+   - `Close` gọi `LeaveGroupContext`, hàm này chạy `waitAndAddRebalanceSilent()`, tức là đợi mọi lần poll đang "giữ" rebalance được thả ra bằng `AllowRebalance`.
+   - Nhánh `case <-ctx.Done()` trong `PollFetches` vẫn gọi `c.waitAndAddPoller()`. Nghĩa là ngay cả một lần poll trả về vì ctx bị huỷ cũng tính là đang chặn rebalance.
+3. `Consume` chỉ gọi `AllowRebalance` ở cuối mỗi lô xử lý xong. Hai đường thoát (poll bị huỷ, và bị huỷ giữa lô) đều bỏ qua lời gọi này, nên việc rời group đợi mãi.
+
+**Nguyên nhân gốc:** với `BlockRebalanceOnPoll`, mọi lần poll, kể cả lần bị huỷ, phải được theo sau bởi `AllowRebalance`. Nếu không, `Close` không rời group được.
+
+**Cách sửa:** `defer cl.AllowRebalance()` ở đầu `Consume`. Thêm `internal/platform/kafka/consume_integration_test.go`: dừng consumer phải trả về trong 10 s. Đã kiểm chứng: bỏ dòng sửa đi thì test fail với "Run did not return after cancel", có dòng sửa thì pass.
+
+**Bài học:** tuỳ chọn nào đổi hợp đồng của thư viện (ở đây là "phải gọi AllowRebalance") thì phải kiểm tra mọi đường thoát, không riêng đường chính. Test cho worker nền phải kiểm tra cả việc dừng, không chỉ kết quả nghiệp vụ.
+
 ## 2026-09-25 — p99 khoảng 1 s không giảm khi chuyển sang Redis
 
 **Triệu chứng:** ở M2, backend Redis cải thiện RPS đỉnh (+40%) và p50 (−90%) so với PG, nhưng p99 phía k6 vẫn khoảng 1 s ở cả hai backend.

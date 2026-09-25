@@ -55,6 +55,10 @@ func NewConsumer(brokers []string, group string, topics ...string) (*kgo.Client,
 // the whole polled batch succeeded; if ctx is cancelled mid-batch nothing is
 // committed and the batch is redelivered later.
 func Consume(ctx context.Context, cl *kgo.Client, logger *slog.Logger, handle Handler) error {
+	// Every poll blocks rebalances until AllowRebalance, including a poll
+	// that returned because ctx was cancelled; leaving the group waits for
+	// it, so without this Close would hang forever.
+	defer cl.AllowRebalance()
 	for {
 		fetches := cl.PollFetches(ctx)
 		if ctx.Err() != nil {
