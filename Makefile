@@ -96,7 +96,8 @@ LOADTEST_OUT := loadtest/out
 
 load-hold: ## k6 kịch bản mở bán; cần booking đang chạy và sự kiện đã seed
 	@mkdir -p $(LOADTEST_OUT)
-	k6 run --summary-export=$(LOADTEST_OUT)/hold_contention-summary.json \
+	COUNT=$$(( $${VUS:-2000} * 25 )) TOKENS_OUT=$(LOADTEST_OUT)/tokens.json k6 run -q loadtest/make_tokens.js
+	TOKENS_FILE=$(CURDIR)/$(LOADTEST_OUT)/tokens.json k6 run --summary-export=$(LOADTEST_OUT)/hold_contention-summary.json \
 		--out csv=$(LOADTEST_OUT)/hold_contention.csv.gz loadtest/hold_contention.js
 	./loadtest/peak_rps.sh $(LOADTEST_OUT)/hold_contention.csv.gz hold
 

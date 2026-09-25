@@ -10,7 +10,10 @@
 //                 server (see docs/adr/006).
 //
 // Each buyer:
-//   1. dev-login (once per VU, or once per iteration);
+//   1. takes an access token prepared before the test by make_tokens.js
+//      (TOKENS_FILE), so logging in is not part of the measured load; VU v
+//      owns tokens v-1, v-1+VUS, v-1+2*VUS... and moves to the next one
+//      after each order it creates (a user may hold one order per event);
 //   2. load the seat map and pick 1-4 random AVAILABLE seats, preferring the
 //      buyer's zone and falling back to any zone when it is sold out;
 //   3. POST /v1/orders; on 409 SEATS_UNAVAILABLE drop the taken seats from
@@ -20,18 +23,23 @@
 // When nothing is available anywhere the buyer sleeps 1s and looks again.
 //
 // Reference measurement (3 runs, fresh database each run, median and range):
-//   make bench-hold BACKEND=pg
+//   make bench-hold BACKEND=redis
 // Single run against an already running booking service:
 //   make db-reset seed && make run-booking   (another terminal)
 //   make load-hold
 //
 // Env: BASE_URL (default http://localhost:8080), EVENT_ID (default 1),
 //      VUS (default 2000), RAMP (default 10s), HOLD (default 60s),
-//      BUYER_MODE (iteration | vu, default iteration).
+//      BUYER_MODE (iteration | vu, default iteration),
+//      TOKENS_FILE (required, JSON array written by make_tokens.js).
+//
+// Latency is also recorded per outcome: hold_created_ms (201),
+// hold_seats_unavailable_ms (409 SEATS_UNAVAILABLE) and hold_other_ms.
 //      Change VUS/RAMP/HOLD only for smoke runs; results use the defaults.
 import http from 'k6/http';
-import { check, sleep } from 'k6';
-import { Counter } from 'k6/metrics';
+import { sleep } from 'k6';
+import { SharedArray } from 'k6/data';
+import { Counter, Trend } from 'k6/metrics';
 import exec from 'k6/execution';
 
 const BASE_URL = __ENV.BASE_URL || 'http://localhost:8080';
@@ -44,6 +52,14 @@ const MAX_RETRIES = 3;
 const BUYER_MODE = __ENV.BUYER_MODE || 'iteration';
 if (BUYER_MODE !== 'vu' && BUYER_MODE !== 'iteration') {
   throw new Error(`BUYER_MODE must be vu or iteration, got ${BUYER_MODE}`);
+}
+if (!__ENV.TOKENS_FILE) {
+  throw new Error('TOKENS_FILE is required: run loadtest/make_tokens.js first (make load-hold does)');
+}
+// Loaded once and shared read-only by all VUs.
+const tokens = new SharedArray('tokens', () => JSON.parse(open(__ENV.TOKENS_FILE)));
+if (tokens.length < VUS) {
+  throw new Error(`need at least ${VUS} tokens, ${__ENV.TOKENS_FILE} has ${tokens.length}`);
 }
 
 export const options = {
@@ -72,9 +88,13 @@ const holdCreated = new Counter('hold_created');
 const holdSeatsTaken = new Counter('hold_seats_unavailable');
 const holdOtherError = new Counter('hold_other_error');
 const soldOutWaits = new Counter('sold_out_waits');
+const tokensExhausted = new Counter('tokens_exhausted');
+const createdMs = new Trend('hold_created_ms', true);
+const seatsTakenMs = new Trend('hold_seats_unavailable_ms', true);
+const otherMs = new Trend('hold_other_ms', true);
 
 // Module scope is per VU: this is the buyer's state.
-let token = null;
+let tokenIndex = -1; // set on the first iteration
 let done = false;
 
 export function setup() {
@@ -82,18 +102,6 @@ export function setup() {
   if (res.status !== 200) {
     throw new Error(`event ${EVENT_ID} not found (${res.status}); run make db-reset seed`);
   }
-  // A per-run offset keeps user ids unique across runs without a db reset.
-  // user id = base + vu * 100,000 + iteration, well below 2^53.
-  return { userBase: (Date.now() % 1_000_000) * 1_000_000_000 };
-}
-
-function login(userId) {
-  const res = http.post(`${BASE_URL}/v1/auth/dev-login`, JSON.stringify({ user_id: userId }), {
-    headers: { 'Content-Type': 'application/json' },
-    tags: { name: 'login' },
-  });
-  check(res, { 'login 200': (r) => r.status === 200 });
-  return res.status === 200 ? res.json('access_token') : null;
 }
 
 function availableSeats() {
@@ -139,22 +147,20 @@ function forget(byZone, seatIds) {
   }
 }
 
-export default function (data) {
+export default function () {
   if (done) {
     sleep(1);
     return;
   }
-  if (BUYER_MODE === 'iteration') {
-    token = null; // a new buyer every iteration
+  if (tokenIndex < 0) {
+    tokenIndex = exec.vu.idInTest - 1;
   }
-  if (token === null) {
-    const iter = BUYER_MODE === 'iteration' ? exec.vu.iterationInScenario : 0;
-    token = login(data.userBase + exec.vu.idInTest * 100_000 + iter);
-    if (token === null) {
-      sleep(1);
-      return;
-    }
+  if (tokenIndex >= tokens.length) {
+    tokensExhausted.add(1);
+    done = true;
+    return;
   }
+  const token = tokens[tokenIndex];
 
   const byZone = availableSeats();
   if (byZone === null) {
@@ -183,15 +189,20 @@ export default function (data) {
       },
     );
     if (res.status === 201) {
+      createdMs.add(res.timings.duration);
       holdCreated.add(1);
+      // This user now holds an order; the next buyer uses a fresh token.
+      tokenIndex += VUS;
       done = BUYER_MODE === 'vu';
       return;
     }
     if (res.status === 409 && res.json('error.code') === 'SEATS_UNAVAILABLE') {
+      seatsTakenMs.add(res.timings.duration);
       holdSeatsTaken.add(1);
       forget(byZone, res.json('error.details.seat_ids') || seats);
       continue;
     }
+    otherMs.add(res.timings.duration);
     holdOtherError.add(1);
     return;
   }

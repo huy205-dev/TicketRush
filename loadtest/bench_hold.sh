@@ -4,9 +4,12 @@
 # Repeats RUNS times (default 3):
 #   1. reset the database (goose reset + up), flush Redis, seed the demo event;
 #   2. start a fresh booking process with INVENTORY_BACKEND=<backend>;
-#   3. run loadtest/hold_contention.js (BUYER_MODE=iteration);
-#   4. stop booking and check the data: loadtest/sql/*.sql, plus
-#      loadtest/check_redis.sh for the redis backend.
+#   3. prepare access tokens (loadtest/make_tokens.js, dev-login) so that
+#      logging in stays out of the measured load;
+#   4. run loadtest/hold_contention.js (BUYER_MODE=iteration);
+#   5. stop booking, check the data (loadtest/sql/*.sql, plus
+#      loadtest/check_redis.sh for the redis backend) and break down the
+#      server-side latency from the booking log (analyze_booking_log.sh).
 # Then reports the median, min and max of every metric across the runs.
 #
 # Usage: loadtest/bench_hold.sh <pg|redis> [runs]    (or: make bench-hold BACKEND=pg)
@@ -36,6 +39,7 @@ set +a
 export INVENTORY_BACKEND=$backend # after .env so it takes precedence
 export BUYER_MODE=iteration
 k6_params="VUS=${VUS:-2000}, RAMP=${RAMP:-10s}, HOLD=${HOLD:-60s}"
+token_count=$(( ${VUS:-2000} * 25 )) # 25 orders per VU before it runs out
 if [ -n "${VUS:-}${RAMP:-}${HOLD:-}" ]; then
   echo "warning: non-default k6 parameters ($k6_params); not a reference measurement" >&2
 fi
@@ -87,9 +91,16 @@ for i in $(seq 1 "$runs"); do
   done
   [ -n "$ready" ] || { echo "booking did not become ready; see $out/run-$i-booking.log" >&2; exit 1; }
 
+  if ! COUNT=$token_count TOKENS_OUT="$out/run-$i-tokens.json" k6 run -q loadtest/make_tokens.js >"$out/run-$i-tokens.txt" 2>&1; then
+    echo "token preparation failed; see $out/run-$i-tokens.txt" >&2
+    exit 1
+  fi
+
   k6_exit=0
-  k6 run --summary-export="$out/run-$i-summary.json" --out csv="$out/run-$i.csv.gz" \
+  # open() in k6 resolves relative paths against the script's directory.
+  TOKENS_FILE="$PWD/$out/run-$i-tokens.json" k6 run --summary-export="$out/run-$i-summary.json" --out csv="$out/run-$i.csv.gz" \
     loadtest/hold_contention.js >"$out/run-$i-k6.txt" 2>&1 || k6_exit=$?
+  rm -f "$out/run-$i-tokens.json"
   stop_booking
   # 99 means thresholds were crossed, which is a result, not a failure.
   if [ "$k6_exit" -ne 0 ] && [ "$k6_exit" -ne 99 ]; then
@@ -105,12 +116,14 @@ for i in $(seq 1 "$runs"); do
   } >"$out/run-$i-checks.txt"
   checks=$(jq -R -s 'split("\n") | map(select(length > 0) | split("|") | {(.[0]): (.[1] | tonumber)}) | add' "$out/run-$i-checks.txt")
   log_errors=$(grep -c '"level":"ERROR"' "$out/run-$i-booking.log" || true)
+  ./loadtest/analyze_booking_log.sh "$out/run-$i-booking.log" >"$out/run-$i-server.json"
 
   jq -c -n \
     --argjson run "$i" --argjson k6_exit "$k6_exit" --argjson peak "$peak" \
     --argjson checks "$checks" --argjson log_errors "$log_errors" \
-    --slurpfile summary "$out/run-$i-summary.json" '
+    --slurpfile summary "$out/run-$i-summary.json" --slurpfile server "$out/run-$i-server.json" '
     $summary[0].metrics as $m
+    | $server[0] as $s
     | $m["http_req_duration{name:hold}"] as $d
     | {
         run: $run,
@@ -125,6 +138,17 @@ for i in $(seq 1 "$runs"); do
         # In k6 summary exports a threshold value of true means it was crossed.
         p99_threshold_ok: ($d.thresholds["p(99)<200"] | not),
         all_requests: $m.http_reqs.count,
+        created_p50_ms: $m.hold_created_ms.med, created_p99_ms: $m.hold_created_ms["p(99)"],
+        conflict_p50_ms: $m.hold_seats_unavailable_ms.med, conflict_p99_ms: $m.hold_seats_unavailable_ms["p(99)"],
+        tokens_exhausted: ($m.tokens_exhausted.count // 0),
+        srv_201_p50_ms: $s.orders["201"].duration_ms.p50, srv_201_p99_ms: $s.orders["201"].duration_ms.p99,
+        srv_409_p50_ms: $s.orders["409"].duration_ms.p50, srv_409_p99_ms: $s.orders["409"].duration_ms.p99,
+        srv_201_acquire_p99_ms: $s.orders["201"].db_acquire_ms.p99, srv_409_acquire_p99_ms: $s.orders["409"].db_acquire_ms.p99,
+        srv_409_acquire_p50_ms: $s.orders["409"].db_acquire_ms.p50,
+        srv_409_query_p99_ms: $s.orders["409"].db_query_ms.p99, srv_409_redis_p99_ms: $s.orders["409"].redis_ms.p99,
+        srv_409_share_db_wait: $s.orders["409"].share_waiting_for_db, srv_201_share_db_wait: $s.orders["201"].share_waiting_for_db,
+        pool_empty_acquires: $s.pool.empty_acquires, pool_empty_wait_ms: $s.pool.empty_acquire_wait_ms,
+        pool_acquires: $s.pool.acquires,
         orders: $checks["info:orders"],
         invariant_violations: ([$checks | to_entries[] | select(.key | startswith("info:") | not) | .value] | add),
         booking_log_errors: $log_errors,
@@ -158,6 +182,16 @@ jq -s '
     peak_rps: stat(.peak_rps), mean_rps: stat(.mean_rps),
     p50_ms: stat(.p50_ms), p95_ms: stat(.p95_ms), p99_ms: stat(.p99_ms), max_ms: stat(.max_ms),
     error_rate: stat(.error_rate),
+    created_p50_ms: stat(.created_p50_ms), created_p99_ms: stat(.created_p99_ms),
+    conflict_p50_ms: stat(.conflict_p50_ms), conflict_p99_ms: stat(.conflict_p99_ms),
+    srv_201_p50_ms: stat(.srv_201_p50_ms), srv_201_p99_ms: stat(.srv_201_p99_ms),
+    srv_409_p50_ms: stat(.srv_409_p50_ms), srv_409_p99_ms: stat(.srv_409_p99_ms),
+    srv_201_acquire_p99_ms: stat(.srv_201_acquire_p99_ms),
+    srv_409_acquire_p50_ms: stat(.srv_409_acquire_p50_ms), srv_409_acquire_p99_ms: stat(.srv_409_acquire_p99_ms),
+    srv_409_query_p99_ms: stat(.srv_409_query_p99_ms), srv_409_redis_p99_ms: stat(.srv_409_redis_p99_ms),
+    srv_201_share_db_wait: stat(.srv_201_share_db_wait), srv_409_share_db_wait: stat(.srv_409_share_db_wait),
+    pool_empty_acquires: stat(.pool_empty_acquires), pool_empty_wait_ms: stat(.pool_empty_wait_ms),
+    tokens_exhausted: ([.[].tokens_exhausted] | add),
     p99_threshold_ok_runs: ([.[] | select(.p99_threshold_ok)] | length),
     invariants_ok_runs: ([.[] | select(.invariant_violations == 0)] | length),
     booking_log_errors: ([.[].booking_log_errors] | add),
@@ -190,7 +224,30 @@ jq -r \
   row("p99 (ms)"; .p99_ms),
   row("max (ms)"; .max_ms),
   row("Tỉ lệ lỗi"; .error_rate),
+  row("p50 request thắng (201), k6 (ms)"; .created_p50_ms),
+  row("p99 request thắng (201), k6 (ms)"; .created_p99_ms),
+  row("p50 request thua (409), k6 (ms)"; .conflict_p50_ms),
+  row("p99 request thua (409), k6 (ms)"; .conflict_p99_ms),
   "",
+  "Phía server, từ log booking (POST /v1/orders; thời gian trong process, không tính mạng và hàng đợi của k6):",
+  "",
+  "| Chỉ số | Trung vị | Min | Max |",
+  "|---|---|---|---|",
+  row("201: p50 (ms)"; .srv_201_p50_ms),
+  row("201: p99 (ms)"; .srv_201_p99_ms),
+  row("201: p99 chờ pgxpool (ms)"; .srv_201_acquire_p99_ms),
+  row("201: tỉ lệ thời gian chờ pgxpool"; .srv_201_share_db_wait),
+  row("409: p50 (ms)"; .srv_409_p50_ms),
+  row("409: p99 (ms)"; .srv_409_p99_ms),
+  row("409: p50 chờ pgxpool (ms)"; .srv_409_acquire_p50_ms),
+  row("409: p99 chờ pgxpool (ms)"; .srv_409_acquire_p99_ms),
+  row("409: p99 thời gian query PG (ms)"; .srv_409_query_p99_ms),
+  row("409: p99 thời gian Redis (ms)"; .srv_409_redis_p99_ms),
+  row("409: tỉ lệ thời gian chờ pgxpool"; .srv_409_share_db_wait),
+  row("Số lần acquire phải chờ (pool rỗng)"; .pool_empty_acquires),
+  row("Tổng thời gian chờ khi pool rỗng (ms)"; .pool_empty_wait_ms),
+  "",
+  "- VU hết token: \(.tokens_exhausted) lần (phải là 0, nếu không kịch bản đã bị cắt bớt)",
   "- Ngưỡng p99 < 200 ms đạt ở \(.p99_threshold_ok_runs)/\(.runs) lần",
   "- Kiểm tra dữ liệu (loadtest/sql) không vi phạm ở \(.invariants_ok_runs)/\(.runs) lần; dòng ERROR trong log booking: \(.booking_log_errors)",
   "",
