@@ -34,6 +34,9 @@ Chọn phương án 2, đúng như SPEC mục 9.2, và đặt sau interface `inv
 
 ## Số liệu
 
-Xem [docs/results.md, mục Baseline PG](../results.md#baseline-pg). Tóm tắt, đo trên laptop với k6 chạy cùng máy:
-- Chế độ `BUYER_MODE=vu`: p99 giữ ghế 35–175 ms, 0% lỗi.
-- Chế độ `iteration`: bán hết 5.000 ghế trong khoảng 11 giây, đỉnh 2.209 req/s, p99 839 ms, 0% lỗi. Không đạt ngưỡng p99 < 200 ms.
+Xem [docs/results.md, mục Baseline PG](../results.md#baseline-pg). Số chuẩn lấy từ `make bench-hold BACKEND=pg` (3 lần, `BUYER_MODE=iteration`, đo trên laptop với k6 chạy cùng máy), báo cáo dạng trung vị [min–max]:
+- RPS giữ ghế đỉnh: 2.124 [2.086–2.184] req/s;
+- p50: 399 [383–503] ms; p99: 971 [875–1.504] ms;
+- 0% lỗi, không ghế nào bị giữ trùng.
+
+Kết quả không đạt ngưỡng p99 < 200 ms ở cả 3 lần.
