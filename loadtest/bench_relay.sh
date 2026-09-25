@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Measures outbox relay throughput: how fast a backlog of ROWS outbox rows
-# (default 50,000) is published to Kafka. Repeats RUNS times (default 3) on
+# (default 200,000) is published to Kafka. Repeats RUNS times (default 3) on
 # a freshly reset database and reports rows/s as median, min and max.
 #
 # Usage: loadtest/bench_relay.sh [rows] [runs]
 # Needs `make up`; the relay must not be running.
 set -euo pipefail
 
-rows=${1:-50000}
+rows=${1:-200000}
 runs=${2:-3}
 [[ "$rows" =~ ^[1-9][0-9]*$ && "$runs" =~ ^[1-9][0-9]*$ ]] || { echo "usage: bench_relay.sh [rows] [runs]" >&2; exit 2; }
 
@@ -55,7 +55,8 @@ SQL
   done
   end=$(now)
   stop_relay
-  # Includes relay start-up (connect, topic check): a conservative figure.
+  # Includes relay start-up (connect, topic check) and up to 100 ms of
+  # polling delay: a conservative figure. Large backlogs keep both small.
   secs=$(python3 -c "print(round($end - $start, 3))")
   rate=$(python3 -c "print(round($rows / ($end - $start)))")
   echo "$rate $secs" >>"$out/runs.txt"
