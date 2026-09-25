@@ -1,0 +1,99 @@
+{
+  "orders": {
+    "201": {
+      "n": 2452,
+      "duration_ms": {
+        "p50": 21.903,
+        "p95": 91.666,
+        "p99": 247.819,
+        "mean": 34.0131610929853
+      },
+      "db_acquire_ms": {
+        "p50": 0.001,
+        "p95": 6.347,
+        "p99": 21.308,
+        "mean": 1.0107181892332724
+      },
+      "db_query_ms": {
+        "p50": 15.889,
+        "p95": 75.718,
+        "p99": 205.218,
+        "mean": 26.946622756933095
+      },
+      "redis_ms": {
+        "p50": 2.141,
+        "p95": 10.404,
+        "p99": 204.891,
+        "mean": 6.027851141924963
+      },
+      "share_waiting_for_db": 0.02971550296281394,
+      "with_db": 2452
+    },
+    "409": {
+      "n": 12132,
+      "duration_ms": {
+        "p50": 2.475,
+        "p95": 28.315,
+        "p99": 220.51,
+        "mean": 11.404287256841387
+      },
+      "db_acquire_ms": {
+        "p50": 0,
+        "p95": 5.874,
+        "p99": 26.11,
+        "mean": 0.9915688262446887
+      },
+      "db_query_ms": {
+        "p50": 0.582,
+        "p95": 4.619,
+        "p99": 9.934,
+        "mean": 2.558685377514011
+      },
+      "redis_ms": {
+        "p50": 1.756,
+        "p95": 13.808,
+        "p99": 210.102,
+        "mean": 8.129568166831524
+      },
+      "share_waiting_for_db": 0.0869470229846982,
+      "with_db": 12132
+    },
+    "other": {
+      "n": 0,
+      "duration_ms": {
+        "p50": null,
+        "p95": null,
+        "p99": null,
+        "mean": null
+      },
+      "db_acquire_ms": {
+        "p50": null,
+        "p95": null,
+        "p99": null,
+        "mean": null
+      },
+      "db_query_ms": {
+        "p50": null,
+        "p95": null,
+        "p99": null,
+        "mean": null
+      },
+      "redis_ms": {
+        "p50": null,
+        "p95": null,
+        "p99": null,
+        "mean": null
+      },
+      "share_waiting_for_db": null,
+      "with_db": 0
+    }
+  },
+  "pool": {
+    "seconds_logged": 26,
+    "acquires": 67040,
+    "empty_acquires": 1928,
+    "empty_acquire_wait_ms": 14506.255,
+    "max_acquired_conns": 40,
+    "max_conns": 40
+  }
+}
