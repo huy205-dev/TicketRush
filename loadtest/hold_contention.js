@@ -1,14 +1,19 @@
 // Opening-sale scenario (SPEC.md 13.3): ramp from 0 to 2,000 buyers in 10s,
 // keep them for 60s. 70% of buyers want VIP seats.
 //
-// Each VU is one buyer with its own user id:
-//   1. dev-login once;
+// BUYER_MODE picks how SPEC.md's "each VU: dev-login, view seats, ..." is read:
+//   vu (default)  each VU is one buyer: log in once, stop after one order;
+//   iteration     every iteration is a new buyer who logs in, so the VU keeps
+//                 placing orders until the event is sold out.
+//
+// Each buyer:
+//   1. dev-login (once per VU, or once per iteration);
 //   2. load the seat map and pick 1-4 random AVAILABLE seats, preferring the
 //      buyer's zone and falling back to any zone when it is sold out;
 //   3. POST /v1/orders; on 409 SEATS_UNAVAILABLE drop the taken seats from
 //      the local copy and retry, at most 3 retries per iteration;
-//   4. after a successful hold the buyer is done and idles, because a user
-//      may hold only one order per event.
+//   4. in vu mode, after a successful hold the buyer is done and idles,
+//      because a user may hold only one order per event.
 // When nothing is available anywhere the buyer sleeps 1s and looks again.
 //
 // Run with the booking service up and a freshly seeded event:
@@ -16,7 +21,8 @@
 //   make load-hold
 //
 // Env: BASE_URL (default http://localhost:8080), EVENT_ID (default 1),
-//      VUS (default 2000), RAMP (default 10s), HOLD (default 60s).
+//      VUS (default 2000), RAMP (default 10s), HOLD (default 60s),
+//      BUYER_MODE (vu | iteration, default vu).
 //      Change VUS/RAMP/HOLD only for smoke runs; results use the defaults.
 import http from 'k6/http';
 import { check, sleep } from 'k6';
@@ -30,6 +36,10 @@ const RAMP = __ENV.RAMP || '10s';
 const HOLD = __ENV.HOLD || '60s';
 const VIP_SHARE = 0.7;
 const MAX_RETRIES = 3;
+const BUYER_MODE = __ENV.BUYER_MODE || 'vu';
+if (BUYER_MODE !== 'vu' && BUYER_MODE !== 'iteration') {
+  throw new Error(`BUYER_MODE must be vu or iteration, got ${BUYER_MODE}`);
+}
 
 export const options = {
   scenarios: {
@@ -68,7 +78,8 @@ export function setup() {
     throw new Error(`event ${EVENT_ID} not found (${res.status}); run make db-reset seed`);
   }
   // A per-run offset keeps user ids unique across runs without a db reset.
-  return { userBase: (Date.now() % 1_000_000) * 100_000 };
+  // user id = base + vu * 100,000 + iteration, well below 2^53.
+  return { userBase: (Date.now() % 1_000_000) * 1_000_000_000 };
 }
 
 function login(userId) {
@@ -128,8 +139,12 @@ export default function (data) {
     sleep(1);
     return;
   }
+  if (BUYER_MODE === 'iteration') {
+    token = null; // a new buyer every iteration
+  }
   if (token === null) {
-    token = login(data.userBase + exec.vu.idInTest);
+    const iter = BUYER_MODE === 'iteration' ? exec.vu.iterationInScenario : 0;
+    token = login(data.userBase + exec.vu.idInTest * 100_000 + iter);
     if (token === null) {
       sleep(1);
       return;
@@ -164,7 +179,7 @@ export default function (data) {
     );
     if (res.status === 201) {
       holdCreated.add(1);
-      done = true;
+      done = BUYER_MODE === 'vu';
       return;
     }
     if (res.status === 409 && res.json('error.code') === 'SEATS_UNAVAILABLE') {
