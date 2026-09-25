@@ -22,6 +22,7 @@ func NewPool(ctx context.Context, databaseURL string, maxConns int32) (*pgxpool.
 		return nil, errors.New("parse DATABASE_URL: invalid connection string")
 	}
 	cfg.MaxConns = maxConns
+	cfg.ConnConfig.Tracer = tracer{}
 
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {

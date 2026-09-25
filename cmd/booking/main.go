@@ -60,6 +60,7 @@ func run(ctx context.Context, lookupEnv func(string) (string, bool), stdout io.W
 		return err
 	}
 	defer pool.Close()
+	go postgres.LogStats(ctx, pool, logger, time.Second)
 
 	rdb := redisx.NewClient(cfg.RedisAddr)
 	defer func() { _ = rdb.Close() }()

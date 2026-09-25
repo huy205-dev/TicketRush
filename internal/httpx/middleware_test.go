@@ -8,10 +8,12 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
 	"github.com/huy205-dev/ticketrush/internal/platform/logging"
+	"github.com/huy205-dev/ticketrush/internal/platform/timing"
 )
 
 func TestRequestID(t *testing.T) {
@@ -168,5 +170,23 @@ func TestRouterFallbacksUseErrorEnvelope(t *testing.T) {
 		if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
 			t.Errorf("%s %s Content-Type = %q, want JSON", tc.method, tc.path, ct)
 		}
+	}
+}
+
+func TestAccessLogIncludesDependencyTimings(t *testing.T) {
+	var buf bytes.Buffer
+	logger := logging.New(&buf, slog.LevelInfo)
+	h := AccessLog(logger)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		timing.AddDBAcquire(r.Context(), 4*time.Millisecond)
+		timing.AddRedis(r.Context(), time.Millisecond)
+	}))
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/v1/orders", nil))
+
+	l := logLines(t, &buf)[0]
+	if l["db_acquire_ms"] != 4.0 || l["db_acquires"] != 1.0 || l["redis_ms"] != 1.0 {
+		t.Errorf("timings missing from access log: %v", l)
+	}
+	if _, ok := l["db_query_ms"]; ok {
+		t.Errorf("unused dependency logged: %v", l)
 	}
 }
