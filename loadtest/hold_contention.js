@@ -14,8 +14,10 @@
 //      (TOKENS_FILE), so logging in is not part of the measured load; VU v
 //      owns tokens v-1, v-1+VUS, v-1+2*VUS... and moves to the next one
 //      after each order it creates (a user may hold one order per event);
-//   2. load the seat map and pick 1-4 random AVAILABLE seats, preferring the
-//      buyer's zone and falling back to any zone when it is sold out;
+//   2. revalidate the seat map with If-None-Match: a 304 keeps the VU's
+//      parsed copy, only a 200 downloads and parses it again (SPEC.md 7.1),
+//      then pick 1-4 random AVAILABLE seats, preferring the buyer's zone and
+//      falling back to any zone when it is sold out;
 //   3. POST /v1/orders; on 409 SEATS_UNAVAILABLE drop the taken seats from
 //      the local copy and retry, at most 3 retries per iteration;
 //   4. in vu mode, after a successful hold the buyer is done and idles,
@@ -35,6 +37,10 @@
 //
 // Latency is also recorded per outcome: hold_created_ms (201),
 // hold_seats_unavailable_ms (409 SEATS_UNAVAILABLE) and hold_other_ms.
+// seatmap_downloads and seatmap_not_modified count full maps and 304s.
+//
+// hold_contention_full.js is the previous variant that downloads the whole
+// map every time; k6 then needs ~10 CPU cores (docs/results.md).
 //      Change VUS/RAMP/HOLD only for smoke runs; results use the defaults.
 import http from 'k6/http';
 import { sleep } from 'k6';
@@ -81,8 +87,9 @@ export const options = {
   summaryTrendStats: ['avg', 'min', 'med', 'p(90)', 'p(95)', 'p(99)', 'max'],
 };
 
-// 409 is a normal business answer during a sale, not a failure.
-http.setResponseCallback(http.expectedStatuses(200, 201, 409));
+// 409 is a normal business answer during a sale and 304 a normal answer to a
+// revalidation; neither is a failure.
+http.setResponseCallback(http.expectedStatuses(200, 201, 304, 409));
 
 const holdCreated = new Counter('hold_created');
 const holdSeatsTaken = new Counter('hold_seats_unavailable');
@@ -92,10 +99,16 @@ const tokensExhausted = new Counter('tokens_exhausted');
 const createdMs = new Trend('hold_created_ms', true);
 const seatsTakenMs = new Trend('hold_seats_unavailable_ms', true);
 const otherMs = new Trend('hold_other_ms', true);
+const seatMapDownloads = new Counter('seatmap_downloads');
+const seatMapNotModified = new Counter('seatmap_not_modified');
 
 // Module scope is per VU: this is the buyer's state.
 let tokenIndex = -1; // set on the first iteration
 let done = false;
+// The VU's copy of the seat map: available seats by zone, and the ETag of the
+// map it was built from.
+let seatMapETag = null;
+let availableByZone = null;
 
 export function setup() {
   const res = http.get(`${BASE_URL}/v1/events/${EVENT_ID}`);
@@ -105,16 +118,27 @@ export function setup() {
 }
 
 function availableSeats() {
-  const res = http.get(`${BASE_URL}/v1/events/${EVENT_ID}/seats`, { tags: { name: 'seatmap' } });
+  const params = { tags: { name: 'seatmap' } };
+  if (seatMapETag !== null) {
+    params.headers = { 'If-None-Match': seatMapETag };
+  }
+  const res = http.get(`${BASE_URL}/v1/events/${EVENT_ID}/seats`, params);
+  if (res.status === 304 && availableByZone !== null) {
+    seatMapNotModified.add(1);
+    return availableByZone; // nothing changed since the VU's copy
+  }
   if (res.status !== 200) {
     return null;
   }
+  seatMapDownloads.add(1);
   const byZone = {};
   for (const s of res.json('seats')) {
     if (s.status === 'AVAILABLE') {
       (byZone[s.zone] = byZone[s.zone] || []).push(s.seat_id);
     }
   }
+  seatMapETag = res.headers['Etag'] || null;
+  availableByZone = byZone;
   return byZone;
 }
 
@@ -191,6 +215,7 @@ export default function () {
     if (res.status === 201) {
       createdMs.add(res.timings.duration);
       holdCreated.add(1);
+      forget(byZone, seats); // no longer available, even if the map is not re-downloaded
       // This user now holds an order; the next buyer uses a fresh token.
       tokenIndex += VUS;
       done = BUYER_MODE === 'vu';
