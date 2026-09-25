@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -245,4 +246,83 @@ func TestBookingFlowOverHTTP(t *testing.T) {
 			t.Errorf("malformed order id = %d, want 404", r.status)
 		}
 	})
+}
+
+// ADR-005: ten parallel requests with one Idempotency-Key create one order;
+// once the winner has answered, the same request returns 200 with that order.
+func TestSameIdempotencyKeyInParallelOverHTTP(t *testing.T) {
+	c, eventID := startServer(t)
+	c.login(77)
+	key := uuid.NewString()
+	body := `{"event_id":` + jsonInt(eventID) + `,"seat_ids":["CAT2-B-1","CAT2-B-2"]}`
+
+	type result struct {
+		status  int
+		orderID uuid.UUID
+		code    string
+	}
+	const workers = 10
+	results := make([]result, workers)
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := range workers {
+		wg.Go(func() {
+			<-start
+			req, _ := http.NewRequest("POST", c.base+"/v1/orders", strings.NewReader(body))
+			req.Header.Set("Authorization", "Bearer "+c.token)
+			req.Header.Set("Idempotency-Key", key)
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Errorf("request %d: %v", i, err)
+				return
+			}
+			defer resp.Body.Close()
+			var payload struct {
+				OrderID uuid.UUID       `json:"order_id"`
+				Error   httpx.ErrorBody `json:"error"`
+			}
+			_ = json.NewDecoder(resp.Body).Decode(&payload)
+			results[i] = result{status: resp.StatusCode, orderID: payload.OrderID, code: payload.Error.Code}
+		})
+	}
+	close(start)
+	wg.Wait()
+
+	var winner uuid.UUID
+	for _, r := range results {
+		if r.status == http.StatusCreated {
+			if winner != uuid.Nil {
+				t.Fatalf("two requests got 201: %v and %v", winner, r.orderID)
+			}
+			winner = r.orderID
+		}
+	}
+	if winner == uuid.Nil {
+		t.Fatalf("no request got 201: %+v", results)
+	}
+	for _, r := range results {
+		switch r.status {
+		case http.StatusCreated:
+		case http.StatusOK:
+			if r.orderID != winner {
+				t.Errorf("200 carried order %v, want %v", r.orderID, winner)
+			}
+		case http.StatusConflict:
+			// Until M2 a request that reaches the seats while the winner is
+			// still running sees them taken; M2 answers
+			// IDEMPOTENCY_KEY_IN_PROGRESS instead (ADR-005).
+			if r.code != "SEATS_UNAVAILABLE" {
+				t.Errorf("409 with code %s", r.code)
+			}
+		default:
+			t.Errorf("unexpected status %d (%s)", r.status, r.code)
+		}
+	}
+
+	for range 3 {
+		r := c.do("POST", "/v1/orders", body, map[string]string{"Idempotency-Key": key})
+		if got := decode[orderResponse](t, r); r.status != http.StatusOK || got.OrderID != winner {
+			t.Fatalf("retry after the winner finished = %d %s, want 200 with order %v", r.status, r.body, winner)
+		}
+	}
 }

@@ -189,7 +189,8 @@ func TestCreateIdempotency(t *testing.T) {
 	}
 }
 
-// SPEC.md 13.2: the same request sent 10 times in parallel creates one order.
+// SPEC.md 13.2: the same request sent 10 times in parallel creates one order,
+// and once the winner has finished, a retry with the key returns that order.
 func TestCreateSameKeyInParallel(t *testing.T) {
 	e := setup(t)
 	ctx := context.Background()
@@ -197,10 +198,10 @@ func TestCreateSameKeyInParallel(t *testing.T) {
 
 	const workers = 10
 	var (
-		created  atomic.Int64
-		replayed atomic.Int64
-		conflict atomic.Int64
-		ids      sync.Map
+		mu       sync.Mutex
+		winners  []uuid.UUID
+		replays  []uuid.UUID
+		inFlight atomic.Int64
 		wg       sync.WaitGroup
 		start    = make(chan struct{})
 	)
@@ -208,17 +209,18 @@ func TestCreateSameKeyInParallel(t *testing.T) {
 		wg.Go(func() {
 			<-start
 			o, isNew, err := e.svc.Create(ctx, 7, key, e.req("VIP-C-1", "VIP-C-2"))
+			mu.Lock()
+			defer mu.Unlock()
 			switch {
 			case err == nil && isNew:
-				created.Add(1)
-				ids.Store(o.ID, true)
+				winners = append(winners, o.ID)
 			case err == nil:
-				replayed.Add(1)
-				ids.Store(o.ID, true)
+				replays = append(replays, o.ID)
 			case errors.Is(err, order.ErrSeatsUnavailable):
-				// Lost the race for the seats to the request that is creating
-				// the order; a client retry with the same key gets 200.
-				conflict.Add(1)
+				// Reached the seats while the winner was still creating the
+				// order. ADR-005: from M2 this becomes 409
+				// IDEMPOTENCY_KEY_IN_PROGRESS instead.
+				inFlight.Add(1)
 			default:
 				t.Errorf("unexpected error: %v", err)
 			}
@@ -227,22 +229,26 @@ func TestCreateSameKeyInParallel(t *testing.T) {
 	close(start)
 	wg.Wait()
 
-	if created.Load() != 1 {
-		t.Errorf("%d requests created an order, want 1", created.Load())
+	if len(winners) != 1 {
+		t.Fatalf("%d requests created an order, want exactly 1", len(winners))
 	}
-	distinct := 0
-	ids.Range(func(any, any) bool { distinct++; return true })
-	if distinct != 1 {
-		t.Errorf("responses referenced %d different orders, want 1", distinct)
+	winner := winners[0]
+	for _, id := range replays {
+		if id != winner {
+			t.Errorf("a replay returned order %v, want the winner %v", id, winner)
+		}
 	}
 	if n := e.countOrders(t); n != 1 {
 		t.Errorf("%d orders in the database, want 1", n)
 	}
-	t.Logf("created=%d replayed=%d seats_unavailable=%d", created.Load(), replayed.Load(), conflict.Load())
+	t.Logf("created=1 replayed=%d in_flight_conflicts=%d", len(replays), inFlight.Load())
 
-	// After the dust settles a retry with the same key is a clean replay.
-	if _, isNew, err := e.svc.Create(ctx, 7, key, e.req("VIP-C-1", "VIP-C-2")); err != nil || isNew {
-		t.Errorf("retry after the race = %v, %v; want replay", isNew, err)
+	// The winner has finished: every retry with the key is a replay of it.
+	for range 3 {
+		o, isNew, err := e.svc.Create(ctx, 7, key, e.req("VIP-C-2", "VIP-C-1"))
+		if err != nil || isNew || o.ID != winner {
+			t.Fatalf("retry after the race = %v, new=%v, %v; want replay of %v", o, isNew, err, winner)
+		}
 	}
 }
 
