@@ -334,6 +334,12 @@ func transition(ctx context.Context, q *orderdb.Queries, id uuid.UUID, from, to 
 }
 
 func (s *Service) writeEvent(ctx context.Context, tx pgx.Tx, eventType string, o *Order) error {
+	return writeOrderEvent(ctx, tx, eventType, o)
+}
+
+// writeOrderEvent adds the outbox message for a state change of o; tx must
+// be the transaction that made the change.
+func writeOrderEvent(ctx context.Context, tx pgx.Tx, eventType string, o *Order) error {
 	_, err := outbox.Write(ctx, tx, outbox.Message{
 		Topic:     events.TopicOrders,
 		Key:       o.ID.String(),
@@ -353,10 +359,17 @@ func (s *Service) writeEvent(ctx context.Context, tx pgx.Tx, eventType string, o
 // not returned: PostgreSQL already reflects the outcome and the hold expires
 // on its own.
 func (s *Service) release(ctx context.Context, eventID int64, seatIDs []string, orderID uuid.UUID) {
+	releaseSeats(ctx, s.inv, s.logger, eventID, seatIDs, orderID)
+}
+
+// releaseSeats is the best-effort release shared by create, cancel and
+// expiry: PostgreSQL already reflects the outcome, and the inventory hold
+// expires on its own if the release fails.
+func releaseSeats(ctx context.Context, inv inventory.Inventory, logger *slog.Logger, eventID int64, seatIDs []string, orderID uuid.UUID) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), releaseTimeout)
 	defer cancel()
-	if err := s.inv.Release(ctx, eventID, seatIDs, orderID); err != nil {
-		s.logger.WarnContext(ctx, "release seats failed; they free up when the hold expires",
+	if err := inv.Release(ctx, eventID, seatIDs, orderID); err != nil {
+		logger.WarnContext(ctx, "release seats failed; they free up when the hold expires",
 			"err", err, "seat_ids", seatIDs)
 	}
 }

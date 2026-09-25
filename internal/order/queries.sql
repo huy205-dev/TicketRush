@@ -42,3 +42,27 @@ UPDATE orders
 SET status = @to_status, updated_at = now()
 WHERE id = @order_id AND status = @from_status
 RETURNING *;
+
+-- name: ExpireDueOrders :many
+-- Moves up to batch_size HELD orders whose hold has passed (database clock)
+-- to EXPIRED (SPEC.md 9.4). SKIP LOCKED lets several workers run side by
+-- side and skips orders locked by a concurrent cancel or payment.
+WITH due AS (
+  SELECT id
+  FROM orders
+  WHERE status = 'HELD' AND hold_expires_at < now()
+  ORDER BY hold_expires_at
+  LIMIT @batch_size::int
+  FOR UPDATE SKIP LOCKED
+)
+UPDATE orders o
+SET status = 'EXPIRED', updated_at = now()
+FROM due
+WHERE o.id = due.id AND o.status = 'HELD'
+RETURNING o.id, o.event_id, o.user_id, o.total_vnd;
+
+-- name: ListSeatsOfOrders :many
+SELECT order_id, seat_id, price_vnd
+FROM order_seats
+WHERE order_id = ANY(@order_ids::uuid[])
+ORDER BY order_id, seat_id;
