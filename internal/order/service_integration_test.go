@@ -23,16 +23,14 @@ import (
 	"github.com/huy205-dev/ticketrush/internal/order"
 	"github.com/huy205-dev/ticketrush/internal/order/orderdb"
 	"github.com/huy205-dev/ticketrush/internal/platform/redisx"
-	"github.com/huy205-dev/ticketrush/internal/platform/testdb"
-	"github.com/huy205-dev/ticketrush/internal/platform/testredis"
+	"github.com/huy205-dev/ticketrush/internal/platform/testenv"
 )
 
-var (
-	db  *testdb.DB
-	rds *testredis.Redis
-)
+var containers testenv.Env
 
-func TestMain(m *testing.M) { testredis.MainWithDB(m, &db, &rds) }
+func TestMain(m *testing.M) {
+	testenv.Main(m, testenv.Needs{Postgres: true, Redis: true}, &containers)
+}
 
 const (
 	holdTTL   = 10 * time.Minute
@@ -51,8 +49,8 @@ type env struct {
 // inventory backend and the real Redis idempotency lock.
 func newEnv(t *testing.T, spec catalog.EventSpec, backend string, locks order.Locker) env {
 	t.Helper()
-	pool := db.New(t, 20)
-	rdb := rds.New(t)
+	pool := containers.DB.New(t, 20)
+	rdb := containers.Redis.New(t)
 	eventID, err := catalog.Seed(context.Background(), pool, spec)
 	if err != nil {
 		t.Fatal(err)

@@ -8,9 +8,13 @@ package inventory
 import (
 	"context"
 	"errors"
+	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
 )
 
 // SeatStatus is the public state of a seat.
@@ -50,4 +54,16 @@ type Inventory interface {
 // clients polling the seat map can tell whether anything changed.
 type Versioner interface {
 	SeatMapVersion(ctx context.Context, eventID int64) (int64, error)
+}
+
+// New returns the backend named by INVENTORY_BACKEND: "pg" or "redis".
+func New(backend string, pool *pgxpool.Pool, rdb redis.UniversalClient, logger *slog.Logger) (Inventory, error) {
+	switch backend {
+	case "pg":
+		return NewPG(pool), nil
+	case "redis":
+		return NewRedis(rdb, logger), nil
+	default:
+		return nil, fmt.Errorf("unknown inventory backend %q", backend)
+	}
 }
