@@ -9,6 +9,7 @@ import (
 	"github.com/huy205-dev/ticketrush/internal/auth"
 	"github.com/huy205-dev/ticketrush/internal/catalog"
 	"github.com/huy205-dev/ticketrush/internal/order"
+	"github.com/huy205-dev/ticketrush/internal/payment"
 )
 
 // ErrBadRequest means the request body could not be parsed.
@@ -29,6 +30,8 @@ type errorMapping struct {
 var errorMappings = []errorMapping{
 	{ErrBadRequest, http.StatusBadRequest, "BAD_REQUEST", "Body không phải JSON hợp lệ", ""},
 	{auth.ErrUnauthorized, http.StatusUnauthorized, "UNAUTHORIZED", "Thiếu hoặc sai access token", ""},
+	{payment.ErrBadSignature, http.StatusUnauthorized, "INVALID_SIGNATURE", "Chữ ký webhook không hợp lệ", ""},
+	{payment.ErrInvalidWebhook, http.StatusBadRequest, "BAD_REQUEST", "Nội dung webhook không hợp lệ", ""},
 	{order.ErrValidation, http.StatusUnprocessableEntity, "VALIDATION_ERROR", "Dữ liệu không hợp lệ", ""},
 	{order.ErrIdempotencyKeyReused, http.StatusUnprocessableEntity, "IDEMPOTENCY_KEY_REUSED", "Idempotency-Key đã dùng cho một request khác", ""},
 	{order.ErrIdempotencyKeyInProgress, http.StatusConflict, "IDEMPOTENCY_KEY_IN_PROGRESS", "Request với Idempotency-Key này đang được xử lý", "1"},

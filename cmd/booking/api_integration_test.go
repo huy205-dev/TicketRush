@@ -15,16 +15,22 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/huy205-dev/ticketrush/internal/auth"
 	"github.com/huy205-dev/ticketrush/internal/catalog"
+	"github.com/huy205-dev/ticketrush/internal/fakepay"
 	"github.com/huy205-dev/ticketrush/internal/httpx"
 	"github.com/huy205-dev/ticketrush/internal/inventory"
 	"github.com/huy205-dev/ticketrush/internal/order"
+	"github.com/huy205-dev/ticketrush/internal/payment"
 	"github.com/huy205-dev/ticketrush/internal/platform/redisx"
 	"github.com/huy205-dev/ticketrush/internal/platform/testenv"
 )
+
+const testWebhookSecret = "wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww"
 
 var containers testenv.Env
 
@@ -78,6 +84,22 @@ func decode[T any](t *testing.T, r response) T {
 // inventory backend ("pg" or "redis").
 func startServer(t *testing.T, backend string) (*client, int64) {
 	t.Helper()
+	s := startFull(t, backend, nil)
+	return s.client, s.eventID
+}
+
+// server is a running booking API, optionally with fakepay beside it.
+type server struct {
+	*client
+	eventID int64
+	pool    *pgxpool.Pool
+	fakepay *fakepay.Server // nil unless started with a fakepay config
+}
+
+// startFull starts booking and, if fp is not nil, a fakepay configured with
+// fp that booking registers payments with and that posts webhooks back.
+func startFull(t *testing.T, backend string, fp *fakepay.Config) server {
+	t.Helper()
 	pool := containers.DB.New(t, 20)
 	rdb := containers.Redis.New(t)
 	eventID, err := catalog.Seed(context.Background(), pool, catalog.DemoEvent())
@@ -92,13 +114,37 @@ func startServer(t *testing.T, backend string) (*client, int64) {
 	cat := catalog.NewService(pool, inv)
 	orders := order.NewService(pool, cat, inv, redisx.NewLocker(rdb),
 		order.Config{HoldTTL: 10 * time.Minute, HoldGrace: 30 * time.Second}, logger)
-	a := newAPI(logger, pool, auth.NewTokens(strings.Repeat("k", 32), time.Hour), cat, orders, true)
-	a.seatMaps.ttl = 0 // always fresh, so the test sees its own changes
+	deps := apiDeps{
+		logger: logger, db: pool, tokens: auth.NewTokens(strings.Repeat("k", 32), time.Hour),
+		catalog: cat, orders: orders, webhookSecret: testWebhookSecret, devLogin: true,
+	}
 
+	bookingSrv := httptest.NewUnstartedServer(nil)
+	s := server{eventID: eventID, pool: pool}
+	if fp != nil {
+		fpSrv := httptest.NewUnstartedServer(nil)
+		cfg := *fp
+		cfg.WebhookSecret = testWebhookSecret
+		cfg.PublicURL = "http://" + fpSrv.Listener.Addr().String()
+		ctx, cancel := context.WithCancel(context.Background())
+		s.fakepay = fakepay.New(ctx, cfg, logger)
+		r := chi.NewRouter()
+		s.fakepay.Routes(r)
+		fpSrv.Config.Handler = r
+		fpSrv.Start()
+		t.Cleanup(func() { fpSrv.Close(); cancel(); s.fakepay.Wait() })
+		deps.payments = payment.NewClient(cfg.PublicURL, 2*time.Second)
+		deps.callbackURL = "http://" + bookingSrv.Listener.Addr().String() + "/v1/webhooks/fakepay"
+	}
+
+	a := newAPI(deps)
+	a.seatMaps.ttl = 0 // always fresh, so the test sees its own changes
 	health := httpx.NewHealth(logger, time.Second, httpx.Check{Name: "postgres", Fn: pool.Ping})
-	srv := httptest.NewServer(newRouter(logger, health, a))
-	t.Cleanup(srv.Close)
-	return &client{t: t, base: srv.URL}, eventID
+	bookingSrv.Config.Handler = newRouter(logger, health, a)
+	bookingSrv.Start()
+	t.Cleanup(bookingSrv.Close)
+	s.client = &client{t: t, base: bookingSrv.URL}
+	return s
 }
 
 func (c *client) login(userID int64) {

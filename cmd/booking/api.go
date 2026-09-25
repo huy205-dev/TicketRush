@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -17,26 +19,46 @@ import (
 	"github.com/huy205-dev/ticketrush/internal/catalog"
 	"github.com/huy205-dev/ticketrush/internal/httpx"
 	"github.com/huy205-dev/ticketrush/internal/order"
+	"github.com/huy205-dev/ticketrush/internal/payment"
 	"github.com/huy205-dev/ticketrush/internal/platform/logging"
+	"github.com/huy205-dev/ticketrush/internal/ticket"
 )
 
 // seatMapTTL is how long a rendered seat map is served from memory
 // (SPEC.md 7.1).
 const seatMapTTL = 500 * time.Millisecond
 
-// api holds the booking HTTP handlers.
-type api struct {
+// paymentLinkTimeout bounds the call to fakepay made while answering a
+// create or get (SPEC.md 9.1 step 9).
+const paymentLinkTimeout = 2 * time.Second
+
+// paymentLinks registers payments with the gateway (payment.Client).
+type paymentLinks interface {
+	CreatePayment(ctx context.Context, req payment.CreatePaymentRequest) (string, error)
+}
+
+// apiDeps are the booking handlers' dependencies.
+type apiDeps struct {
 	logger   *slog.Logger
 	db       authdb.DBTX
 	tokens   *auth.Tokens
 	catalog  *catalog.Service
 	orders   *order.Service
-	seatMaps *seatMapCache
-	devLogin bool
+	payments paymentLinks
+	// webhookSecret verifies X-Signature; callbackURL is where fakepay posts.
+	webhookSecret string
+	callbackURL   string
+	devLogin      bool
 }
 
-func newAPI(logger *slog.Logger, db authdb.DBTX, tokens *auth.Tokens, cat *catalog.Service, orders *order.Service, devLogin bool) *api {
-	a := &api{logger: logger, db: db, tokens: tokens, catalog: cat, orders: orders, devLogin: devLogin}
+// api holds the booking HTTP handlers.
+type api struct {
+	apiDeps
+	seatMaps *seatMapCache
+}
+
+func newAPI(d apiDeps) *api {
+	a := &api{apiDeps: d}
 	a.seatMaps = newSeatMapCache(seatMapTTL, a.renderSeatMap)
 	return a
 }
@@ -48,12 +70,14 @@ func (a *api) routes(r chi.Router) {
 		}
 		r.Get("/events/{eventID}", a.handleGetEvent)
 		r.Get("/events/{eventID}/seats", a.handleGetSeats)
+		r.Post("/webhooks/fakepay", a.handleWebhook)
 
 		r.Group(func(r chi.Router) {
 			r.Use(httpx.RequireUser(a.tokens, a.logger))
 			r.Post("/orders", a.handleCreateOrder)
 			r.Get("/orders/{orderID}", a.handleGetOrder)
 			r.Post("/orders/{orderID}/cancel", a.handleCancelOrder)
+			r.Get("/orders/{orderID}/tickets", a.handleTickets)
 		})
 	})
 }
@@ -215,9 +239,11 @@ type orderResponse struct {
 	TotalVND      int64               `json:"total_vnd"`
 	HoldExpiresAt time.Time           `json:"hold_expires_at"`
 	Seats         []orderSeatResponse `json:"seats"`
-	// PaymentURL is filled once fakepay exists (M4).
-	PaymentURL string    `json:"payment_url,omitempty"`
-	CreatedAt  time.Time `json:"created_at"`
+	// PaymentURL is where to pay; present only while the order is HELD.
+	PaymentURL string `json:"payment_url,omitempty"`
+	// Tickets are listed once issued (TICKETED), without the PNG images.
+	Tickets   []ticketResponse `json:"tickets,omitempty"`
+	CreatedAt time.Time        `json:"created_at"`
 }
 
 func toOrderResponse(o *order.Order) orderResponse {
@@ -258,11 +284,129 @@ func (a *api) handleCreateOrder(w http.ResponseWriter, r *http.Request) {
 	if created {
 		status = http.StatusCreated
 	}
-	httpx.WriteJSON(w, status, toOrderResponse(o))
+	resp := toOrderResponse(o)
+	resp.PaymentURL = a.paymentURL(r.Context(), o)
+	httpx.WriteJSON(w, status, resp)
+}
+
+// paymentURL registers o with the gateway and returns where to pay. Only a
+// HELD order can be paid. If the gateway is slow or down the order is still
+// returned without a link; the client gets it later from GET /v1/orders/{id}.
+func (a *api) paymentURL(ctx context.Context, o *order.Order) string {
+	if a.payments == nil || o.Status != order.StatusHeld {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(ctx, paymentLinkTimeout)
+	defer cancel()
+	u, err := a.payments.CreatePayment(ctx, payment.CreatePaymentRequest{
+		OrderID: o.ID, AmountVND: o.TotalVND, CallbackURL: a.callbackURL,
+	})
+	if err != nil {
+		a.logger.WarnContext(ctx, "payment link unavailable; the client can fetch it later", "err", err)
+		return ""
+	}
+	return u
 }
 
 func (a *api) handleGetOrder(w http.ResponseWriter, r *http.Request) {
 	a.withOrder(w, r, a.orders.Get)
+}
+
+// ---- payments and tickets ------------------------------------------------
+
+// maxWebhookBytes caps the webhook body; the real one is ~200 bytes.
+const maxWebhookBytes = 64 << 10
+
+type webhookResponse struct {
+	Outcome order.Outcome `json:"outcome"`
+}
+
+// handleWebhook receives fakepay's payment results (SPEC.md 7.1, 9.3). It
+// answers 200 whenever the webhook is recorded (duplicates and refunds
+// included), 401 for a bad signature and 500 only for infrastructure
+// errors, which makes fakepay retry.
+func (a *api) handleWebhook(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxWebhookBytes))
+	if err != nil {
+		httpx.WriteErr(w, r, a.logger, fmt.Errorf("%w: %w", httpx.ErrBadRequest, err))
+		return
+	}
+	// The signature covers the raw bytes, so check it before parsing.
+	if !payment.Verify(a.webhookSecret, body, r.Header.Get(payment.SignatureHeader)) {
+		httpx.WriteErr(w, r, a.logger, payment.ErrBadSignature)
+		return
+	}
+	var wh payment.Webhook
+	if err := json.Unmarshal(body, &wh); err != nil {
+		httpx.WriteErr(w, r, a.logger, fmt.Errorf("%w: %w", payment.ErrInvalidWebhook, err))
+		return
+	}
+	if err := wh.Validate(); err != nil {
+		httpx.WriteErr(w, r, a.logger, err)
+		return
+	}
+	res, err := a.orders.ApplyPayment(r.Context(), wh)
+	if err != nil {
+		httpx.WriteErr(w, r, a.logger, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, webhookResponse{Outcome: res.Outcome})
+}
+
+type ticketResponse struct {
+	TicketID    uuid.UUID `json:"ticket_id"`
+	SeatID      string    `json:"seat_id"`
+	IssuedAt    time.Time `json:"issued_at"`
+	QRPayload   string    `json:"qr_payload"`
+	QRPNGBase64 string    `json:"qr_png_base64,omitempty"`
+}
+
+type ticketsResponse struct {
+	OrderID uuid.UUID        `json:"order_id"`
+	Tickets []ticketResponse `json:"tickets"`
+}
+
+// handleTickets returns the issued tickets of the caller's order with their
+// QR codes as base64 PNG images. Before issuance the list is empty.
+func (a *api) handleTickets(w http.ResponseWriter, r *http.Request) {
+	userID, _ := auth.UserIDFrom(r.Context())
+	orderID, err := uuid.Parse(chi.URLParam(r, "orderID"))
+	if err != nil {
+		httpx.WriteErr(w, r, a.logger, order.ErrNotFound)
+		return
+	}
+	ctx := logging.With(r.Context(), slog.String("order_id", orderID.String()))
+	tickets, err := a.issuedTickets(ctx, userID, orderID, true)
+	if err != nil {
+		httpx.WriteErr(w, r.WithContext(ctx), a.logger, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, ticketsResponse{OrderID: orderID, Tickets: tickets})
+}
+
+// issuedTickets lists the order's issued tickets, with PNG QR codes if
+// withPNG. Tickets not issued yet are left out.
+func (a *api) issuedTickets(ctx context.Context, userID int64, orderID uuid.UUID, withPNG bool) ([]ticketResponse, error) {
+	tickets, err := a.orders.Tickets(ctx, userID, orderID)
+	if err != nil {
+		return nil, err
+	}
+	out := []ticketResponse{}
+	for _, t := range tickets {
+		if t.QRPayload == "" || t.IssuedAt == nil {
+			continue
+		}
+		tr := ticketResponse{TicketID: t.ID, SeatID: t.SeatID, IssuedAt: t.IssuedAt.UTC(), QRPayload: t.QRPayload}
+		if withPNG {
+			png, err := ticket.PNG(t.QRPayload)
+			if err != nil {
+				return nil, err
+			}
+			tr.QRPNGBase64 = base64.StdEncoding.EncodeToString(png)
+		}
+		out = append(out, tr)
+	}
+	return out, nil
 }
 
 func (a *api) handleCancelOrder(w http.ResponseWriter, r *http.Request) {
@@ -283,7 +427,15 @@ func (a *api) withOrder(w http.ResponseWriter, r *http.Request, op func(context.
 		httpx.WriteErr(w, r.WithContext(ctx), a.logger, err)
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, toOrderResponse(o))
+	resp := toOrderResponse(o)
+	resp.PaymentURL = a.paymentURL(ctx, o)
+	if o.Status == order.StatusTicketed {
+		if resp.Tickets, err = a.issuedTickets(ctx, userID, orderID, false); err != nil {
+			httpx.WriteErr(w, r.WithContext(ctx), a.logger, err)
+			return
+		}
+	}
+	httpx.WriteJSON(w, http.StatusOK, resp)
 }
 
 // ---- helpers -------------------------------------------------------------

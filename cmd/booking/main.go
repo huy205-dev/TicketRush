@@ -20,6 +20,7 @@ import (
 	"github.com/huy205-dev/ticketrush/internal/httpx"
 	"github.com/huy205-dev/ticketrush/internal/inventory"
 	"github.com/huy205-dev/ticketrush/internal/order"
+	"github.com/huy205-dev/ticketrush/internal/payment"
 	"github.com/huy205-dev/ticketrush/internal/platform/app"
 	"github.com/huy205-dev/ticketrush/internal/platform/config"
 	"github.com/huy205-dev/ticketrush/internal/platform/httpserver"
@@ -79,7 +80,17 @@ func run(ctx context.Context, lookupEnv func(string) (string, bool), stdout io.W
 	orders := order.NewService(pool, cat, inv, redisx.NewLocker(rdb),
 		order.Config{HoldTTL: cfg.HoldTTL, HoldGrace: cfg.HoldGrace}, logger)
 	tokens := auth.NewTokens(cfg.JWTSecret, auth.AccessTokenTTL)
-	api := newAPI(logger, pool, tokens, cat, orders, cfg.IsDev())
+	api := newAPI(apiDeps{
+		logger:        logger,
+		db:            pool,
+		tokens:        tokens,
+		catalog:       cat,
+		orders:        orders,
+		payments:      payment.NewClient(cfg.FakepayURL, paymentLinkTimeout),
+		webhookSecret: cfg.WebhookSecret,
+		callbackURL:   cfg.PublicBaseURL + "/v1/webhooks/fakepay",
+		devLogin:      cfg.IsDev(),
+	})
 
 	srv := &http.Server{
 		Handler:           newRouter(logger, health, api),
