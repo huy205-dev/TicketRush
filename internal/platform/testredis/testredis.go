@@ -15,7 +15,6 @@ import (
 	tcredis "github.com/testcontainers/testcontainers-go/modules/redis"
 
 	"github.com/huy205-dev/ticketrush/internal/platform/redisx"
-	"github.com/huy205-dev/ticketrush/internal/platform/testdb"
 )
 
 // Image matches deploy/compose.yaml.
@@ -70,29 +69,5 @@ func Main(m *testing.M, dst **Redis) {
 	*dst = r
 	code := m.Run()
 	r.Terminate()
-	os.Exit(code)
-}
-
-// MainWithDB starts PostgreSQL and Redis, runs the tests and stops both.
-//
-//	var (db *testdb.DB; rds *testredis.Redis)
-//	func TestMain(m *testing.M) { testredis.MainWithDB(m, &db, &rds) }
-func MainWithDB(m *testing.M, db **testdb.DB, rds **Redis) {
-	ctx := context.Background()
-	pg, err := testdb.Start(ctx)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "testdb: %v\n", err)
-		os.Exit(1)
-	}
-	r, err := Start(ctx)
-	if err != nil {
-		pg.Terminate()
-		fmt.Fprintf(os.Stderr, "testredis: %v\n", err)
-		os.Exit(1)
-	}
-	*db, *rds = pg, r
-	code := m.Run()
-	r.Terminate()
-	pg.Terminate()
 	os.Exit(code)
 }

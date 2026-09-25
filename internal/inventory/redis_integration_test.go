@@ -18,7 +18,7 @@ import (
 
 func newRedisInventory(t *testing.T) (*inventory.Redis, *redis.Client) {
 	t.Helper()
-	rdb := rds.New(t)
+	rdb := containers.Redis.New(t)
 	return inventory.NewRedis(rdb, slog.New(slog.DiscardHandler)), rdb
 }
 

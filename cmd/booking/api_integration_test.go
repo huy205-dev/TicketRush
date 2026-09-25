@@ -20,19 +20,17 @@ import (
 	"github.com/huy205-dev/ticketrush/internal/auth"
 	"github.com/huy205-dev/ticketrush/internal/catalog"
 	"github.com/huy205-dev/ticketrush/internal/httpx"
+	"github.com/huy205-dev/ticketrush/internal/inventory"
 	"github.com/huy205-dev/ticketrush/internal/order"
-	"github.com/huy205-dev/ticketrush/internal/platform/config"
 	"github.com/huy205-dev/ticketrush/internal/platform/redisx"
-	"github.com/huy205-dev/ticketrush/internal/platform/testdb"
-	"github.com/huy205-dev/ticketrush/internal/platform/testredis"
+	"github.com/huy205-dev/ticketrush/internal/platform/testenv"
 )
 
-var (
-	db  *testdb.DB
-	rds *testredis.Redis
-)
+var containers testenv.Env
 
-func TestMain(m *testing.M) { testredis.MainWithDB(m, &db, &rds) }
+func TestMain(m *testing.M) {
+	testenv.Main(m, testenv.Needs{Postgres: true, Redis: true}, &containers)
+}
 
 type client struct {
 	t     *testing.T
@@ -80,15 +78,17 @@ func decode[T any](t *testing.T, r response) T {
 // inventory backend ("pg" or "redis").
 func startServer(t *testing.T, backend string) (*client, int64) {
 	t.Helper()
-	pool := db.New(t, 20)
-	rdb := rds.New(t)
+	pool := containers.DB.New(t, 20)
+	rdb := containers.Redis.New(t)
 	eventID, err := catalog.Seed(context.Background(), pool, catalog.DemoEvent())
 	if err != nil {
 		t.Fatal(err)
 	}
 	logger := slog.New(slog.DiscardHandler)
-	cfg := &config.Config{InventoryBackend: backend}
-	inv := newInventory(cfg, pool, rdb, logger)
+	inv, err := inventory.New(backend, pool, rdb, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
 	cat := catalog.NewService(pool, inv)
 	orders := order.NewService(pool, cat, inv, redisx.NewLocker(rdb),
 		order.Config{HoldTTL: 10 * time.Minute, HoldGrace: 30 * time.Second}, logger)

@@ -11,22 +11,18 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"os/signal"
-	"syscall"
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/redis/go-redis/v9"
 
 	"github.com/huy205-dev/ticketrush/internal/auth"
 	"github.com/huy205-dev/ticketrush/internal/catalog"
 	"github.com/huy205-dev/ticketrush/internal/httpx"
 	"github.com/huy205-dev/ticketrush/internal/inventory"
 	"github.com/huy205-dev/ticketrush/internal/order"
+	"github.com/huy205-dev/ticketrush/internal/platform/app"
 	"github.com/huy205-dev/ticketrush/internal/platform/config"
 	"github.com/huy205-dev/ticketrush/internal/platform/httpserver"
-	"github.com/huy205-dev/ticketrush/internal/platform/logging"
 	"github.com/huy205-dev/ticketrush/internal/platform/postgres"
 	"github.com/huy205-dev/ticketrush/internal/platform/redisx"
 )
@@ -38,14 +34,7 @@ const (
 )
 
 func main() {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	// After the first signal, restore default handling so a second Ctrl+C
-	// kills the process instead of waiting for the graceful shutdown.
-	go func() {
-		<-ctx.Done()
-		stop()
-	}()
-
+	ctx, stop := app.SignalContext()
 	err := run(ctx, os.LookupEnv, os.Stdout)
 	stop()
 	if err != nil {
@@ -56,16 +45,8 @@ func main() {
 // run wires dependencies and blocks until ctx is cancelled. Errors are
 // logged before being returned.
 func run(ctx context.Context, lookupEnv func(string) (string, bool), stdout io.Writer) error {
-	logger := logging.New(stdout, slog.LevelInfo).With("service", serviceName)
-
-	cfg, err := config.Load(lookupEnv)
+	cfg, logger, err := app.Setup(serviceName, lookupEnv, stdout)
 	if err != nil {
-		var ve *config.ValidationError
-		if errors.As(err, &ve) {
-			logger.Error("invalid configuration, see .env.example", "problems", ve.Problems)
-		} else {
-			logger.Error("load configuration", "err", err)
-		}
 		return err
 	}
 	if err := checkSupported(cfg); err != nil {
@@ -88,7 +69,11 @@ func run(ctx context.Context, lookupEnv func(string) (string, bool), stdout io.W
 		httpx.Check{Name: "redis", Fn: func(ctx context.Context) error { return rdb.Ping(ctx).Err() }},
 	)
 
-	inv := newInventory(cfg, pool, rdb, logger)
+	inv, err := inventory.New(cfg.InventoryBackend, pool, rdb, logger)
+	if err != nil {
+		logger.Error("init inventory", "err", err)
+		return err
+	}
 	cat := catalog.NewService(pool, inv)
 	orders := order.NewService(pool, cat, inv, redisx.NewLocker(rdb),
 		order.Config{HoldTTL: cfg.HoldTTL, HoldGrace: cfg.HoldGrace}, logger)
@@ -125,15 +110,6 @@ func checkSupported(cfg *config.Config) error {
 		return errors.New("REQUIRE_ADMISSION=true needs the waiting room (M5); set REQUIRE_ADMISSION=false")
 	}
 	return nil
-}
-
-// newInventory picks the seat-holding backend (INVENTORY_BACKEND). Config
-// validation guarantees it is one of the two.
-func newInventory(cfg *config.Config, pool *pgxpool.Pool, rdb redis.UniversalClient, logger *slog.Logger) inventory.Inventory {
-	if cfg.InventoryBackend == config.BackendPG {
-		return inventory.NewPG(pool)
-	}
-	return inventory.NewRedis(rdb, logger)
 }
 
 func newRouter(logger *slog.Logger, health *httpx.Health, api *api) http.Handler {

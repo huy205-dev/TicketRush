@@ -21,16 +21,14 @@ import (
 
 	"github.com/huy205-dev/ticketrush/internal/catalog"
 	"github.com/huy205-dev/ticketrush/internal/inventory"
-	"github.com/huy205-dev/ticketrush/internal/platform/testdb"
-	"github.com/huy205-dev/ticketrush/internal/platform/testredis"
+	"github.com/huy205-dev/ticketrush/internal/platform/testenv"
 )
 
-var (
-	db  *testdb.DB
-	rds *testredis.Redis
-)
+var containers testenv.Env
 
-func TestMain(m *testing.M) { testredis.MainWithDB(m, &db, &rds) }
+func TestMain(m *testing.M) {
+	testenv.Main(m, testenv.Needs{Postgres: true, Redis: true}, &containers)
+}
 
 const holdTTL = 10 * time.Minute
 
@@ -50,12 +48,12 @@ type fixture struct {
 
 func newFixture(t *testing.T) fixture {
 	t.Helper()
-	pool := db.New(t, 20)
+	pool := containers.DB.New(t, 20)
 	eventID, err := catalog.Seed(context.Background(), pool, catalog.DemoEvent())
 	if err != nil {
 		t.Fatal(err)
 	}
-	return fixture{pool: pool, rdb: rds.New(t), eventID: eventID}
+	return fixture{pool: pool, rdb: containers.Redis.New(t), eventID: eventID}
 }
 
 func (f fixture) pg() backend {
