@@ -3,9 +3,13 @@
 .env.*
 !.env.example
 
-# Build output
+# Build output (including `go build ./cmd/<name>` run from the repo root)
 /bin/
 /dist/
+/booking
+/expiry
+/relay
+/seed
 
 # Test and load-test output
 *.test
