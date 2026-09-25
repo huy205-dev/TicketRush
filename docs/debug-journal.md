@@ -12,6 +12,24 @@ Mỗi lỗi khó gặp phải được ghi theo mẫu dưới đây, mới nhấ
 **Bài học:**
 ```
 
+## 2026-09-25 — So khớp Redis với PostgreSQL báo 10.000 vi phạm dù dữ liệu đúng
+
+**Triệu chứng:** lần chạy thử đầu tiên của `loadtest/check_redis.sh` (so sánh key `seat:{1}:*` trong Redis với các đơn `HELD` trong PostgreSQL) báo `redis_key_not_in_pg=5000` và `pg_state_missing_in_redis=5000`. Nghĩa là không dòng nào khớp, trong khi các kiểm tra SQL khác và toàn bộ test tích hợp đều đạt.
+
+**Cách điều tra:**
+1. Cả hai phía đều đúng 5.000 dòng. Lệch toàn bộ chứ không phải một phần, nên nghi ngờ định dạng trước dữ liệu.
+2. In byte thô của hai phía bằng `od -c`:
+   - Redis trả `seat:{1}:VIP-I-29 held:01a0…`, đúng như mong đợi;
+   - PostgreSQL trả `VIP-A-29 held 01a0…`.
+   Phía Redis vẫn còn nguyên tiền tố `seat:{1}:`, tức bước `awk` không cắt được nó.
+3. Bước cắt dùng `sub(prefix, "", $1)`. Tham số đầu của `sub` là một biểu thức chính quy, không phải chuỗi.
+
+**Nguyên nhân gốc:** trong regex, `{1}` là lượng từ "lặp đúng 1 lần" của ký tự đứng trước. Vì vậy `seat:{1}:` được hiểu là `seat` + `:` (một lần) + `:`, tức chuỗi `seat::`, và không bao giờ khớp với tên key có hash tag.
+
+**Cách sửa:** commit `0cc0197`. So tiền tố như một chuỗi thường: `index($1, prefix) == 1`, rồi cắt bằng `substr`. Mình kiểm chứng lại bằng cách cố ý thêm một key giả vào Redis: script báo đúng 1 vi phạm, và báo 0 sau khi xoá key đó.
+
+**Bài học:** hash tag `{…}` của Redis Cluster trùng cú pháp lượng từ của regex. Mọi chỗ xử lý tên key bằng công cụ dùng regex (`awk`, `sed`, `grep`) phải escape dấu ngoặc nhọn hoặc so sánh như chuỗi thường. Và một script kiểm tra phải được thử với dữ liệu sai (negative test) trước khi tin vào kết quả "0 vi phạm" của nó.
+
 ## 2026-09-25 — sqlc báo "2 edits overlap" và "syntax error at or near …" với query hoàn toàn hợp lệ
 
 **Triệu chứng:** `sqlc generate` (v1.31.1) lỗi trên nhiều file cùng lúc:

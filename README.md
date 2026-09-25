@@ -6,7 +6,12 @@ Khi mở bán một concert, hàng chục nghìn người cùng bấm vào vài 
 
 Đặc tả đầy đủ: [SPEC.md](SPEC.md).
 
-> **Trạng thái:** xong **M1 – bản gốc chỉ dùng PostgreSQL**, đang chờ review. Đã giữ ghế, tạo/xem/huỷ đơn với Idempotency-Key, có số liệu đo baseline. Chưa có Redis, thanh toán, phòng chờ.
+> **Trạng thái:** xong **M2 – giữ ghế bằng Redis Lua**. Hệ thống đã có:
+> - giữ ghế bằng Redis (mặc định) hoặc PostgreSQL;
+> - tạo, xem, huỷ đơn với Idempotency-Key, dùng khoá Redis cho các request trùng đang chạy;
+> - số liệu so sánh PG và Redis.
+>
+> Chưa có: expiry worker, relay Kafka, thanh toán, phòng chờ.
 
 ## Demo
 
@@ -38,26 +43,27 @@ PostgreSQL là nguồn sự thật; Redis chỉ giữ trạng thái tạm và d�
 
 ## Kết quả đo
 
-Baseline PostgreSQL, đo bằng `make bench-hold BACKEND=pg`:
-- 3 lần, mỗi lần reset DB và seed lại;
+Đo bằng `make bench-hold BACKEND=<pg|redis>`:
+- 3 lần mỗi backend, mỗi lần reset DB và seed lại;
 - kịch bản mở bán 2.000 VU, mỗi vòng lặp là một người mua mới;
-- máy MacBook Apple M5 Pro 24 GiB, k6 chạy cùng máy, nên chỉ để so sánh tương đối.
+- cả hai backend chạy cùng commit (`0cc0197`), trên MacBook Apple M5 Pro 24 GiB, k6 chạy cùng máy, nên chỉ để so sánh tương đối.
 
-Chi tiết và nhận xét ở [docs/results.md](docs/results.md#baseline-pg).
+Chi tiết và nhận xét ở [docs/results.md](docs/results.md#so-sánh-pg-và-redis).
 
-| Backend | Request giữ ghế | RPS đỉnh | p50 | p95 | p99 | Lỗi | Ghế bán trùng |
-|---|---|---|---|---|---|---|---|
-| pg (trung vị [min–max]) | 14.776 [14.275–14.918] | 2.124 [2.086–2.184] | 399 ms [383–503] | 804 ms [766–1.342] | 971 ms [875–1.504] | 0% | 0 |
-| redis | chưa đo (M2) | | | | | | |
+| Backend (trung vị [min–max]) | RPS giữ ghế đỉnh | p50 | p95 | p99 | Lỗi | Ghế bán trùng |
+|---|---|---|---|---|---|---|
+| pg | 2.070 [1.762–2.154] | 462 ms [446–489] | 974 ms [728–1.035] | 1.062 ms [959–1.115] | 0% | 0 |
+| redis | **2.901** [2.775–2.971] | **48 ms** [44–63] | **502 ms** [454–542] | 958 ms [765–1.100] | 0% | 0 |
 
-Chưa đạt mục tiêu ≥ 5.000 req/s và p99 < 200 ms.
+Redis: đỉnh +40%, p50 −90%, p95 −48%, nhưng p99 chỉ −10%. Vẫn chưa đạt mục tiêu ≥ 5.000 req/s và p99 < 200 ms.
 
 ## Quyết định kỹ thuật
 
 Danh sách đầy đủ ở [docs/adr/](docs/adr/README.md).
 
 - [ADR-000](docs/adr/000-ban-goc-postgresql.md): làm bản gốc giữ ghế chỉ bằng PostgreSQL (`SELECT … FOR UPDATE`) trước khi dùng Redis.
-- [ADR-005](docs/adr/005-idempotency-key.md): Idempotency-Key: hash trên request đã chuẩn hoá. Request song song cùng key sẽ nhận `409 IDEMPOTENCY_KEY_IN_PROGRESS` nhờ khoá Redis (làm ở M2).
+- [ADR-001](docs/adr/001-giu-ghe-bang-redis-lua.md): giữ ghế bằng script Lua trong Redis; hash tag theo sự kiện; `HOLD_GRACE`.
+- [ADR-005](docs/adr/005-idempotency-key.md): Idempotency-Key: hash trên request đã chuẩn hoá. Khoá Redis cho request đang chạy trả `409 IDEMPOTENCY_KEY_IN_PROGRESS`; khi Redis không trả lời thì trả `503` (fail closed).
 - [ADR-006](docs/adr/006-lua-chon-khi-spec-chua-ro-m1.md): các lựa chọn khi SPEC chưa nói rõ ở M1.
 
 ## API (booking, `:8080`)
@@ -66,8 +72,8 @@ Danh sách đầy đủ ở [docs/adr/](docs/adr/README.md).
 |---|---|---|
 | POST | `/v1/auth/dev-login` | `{"user_id": 123}` → JWT 24 h. Chỉ bật khi `APP_ENV=dev` |
 | GET | `/v1/events/{id}` | Thông tin sự kiện, các khu và giá |
-| GET | `/v1/events/{id}/seats` | 5.000 ghế kèm trạng thái; cache 500 ms, gzip |
-| POST | `/v1/orders` | Cần `Authorization` và `Idempotency-Key` (UUID). 201 tạo mới, 200 gửi lại |
+| GET | `/v1/events/{id}/seats` | 5.000 ghế kèm trạng thái và `version`; cache 500 ms, gzip |
+| POST | `/v1/orders` | Cần `Authorization` và `Idempotency-Key` (UUID). 201 tạo mới, 200 gửi lại, 409 `IDEMPOTENCY_KEY_IN_PROGRESS` khi request cùng key đang chạy |
 | GET | `/v1/orders/{id}` | Chỉ chủ đơn xem được |
 | POST | `/v1/orders/{id}/cancel` | Chỉ khi `HELD`; huỷ lại đơn đã huỷ vẫn trả 200 |
 | GET | `/healthz`, `/readyz` | readyz kiểm tra PostgreSQL và Redis |
@@ -125,11 +131,13 @@ make test-integration  # test tích hợp với PostgreSQL thật (testcontainer
 make lint              # gofmt, go vet, staticcheck, sqlc diff
 ```
 
-Test tích hợp chạy mỗi test trên một database riêng, clone từ template đã migrate. Trong đó có:
+Test tích hợp chạy trên PostgreSQL và Redis thật. Mỗi test có một database riêng, clone từ template đã migrate, và một Redis trống. Các test tranh chấp chạy cho **cả hai backend** giữ ghế:
 - 1.000 goroutine cùng giữ `VIP-A-1` thì đúng 1 thành công;
 - 200 goroutine giữ ngẫu nhiên 2 ghế trong 20 ghế thì không ghế nào thuộc hai đơn;
-- 10 request song song cùng Idempotency-Key thì chỉ ra 1 đơn;
+- 10 request song song cùng Idempotency-Key thì chỉ ra 1 đơn, và không request nào nhận `SEATS_UNAVAILABLE`;
 - luồng HTTP đầu–cuối.
+
+Ngoài ra có test riêng cho từng script Lua.
 
 CI (GitHub Actions, [.github/workflows/ci.yaml](.github/workflows/ci.yaml)) có hai job:
 - lint + unit test: gofmt, `sqlc diff`, `go vet`, staticcheck, `go test -race`;
@@ -138,7 +146,8 @@ CI (GitHub Actions, [.github/workflows/ci.yaml](.github/workflows/ci.yaml)) có 
 ### Test tải
 
 ```sh
-make bench-hold BACKEND=pg   # đo chuẩn: 3 lần, tự reset DB + seed + chạy booking, in trung vị/min/max
+make bench-hold BACKEND=redis   # đo chuẩn: 3 lần, tự reset DB + seed + chạy booking, in trung vị/min/max
+make bench-hold BACKEND=pg      # bản gốc để so sánh
 
 # Hoặc chạy một lần với booking đang chạy sẵn:
 make db-reset seed && make run-booking   # terminal khác
@@ -152,8 +161,8 @@ make load-hold                           # BUYER_MODE=vu để thử chế độ
 | Milestone | Nội dung | Trạng thái |
 |---|---|---|
 | M0 | Khung dự án, hạ tầng local, healthz/readyz, CI | Xong |
-| M1 | Bản gốc chỉ dùng PostgreSQL | Xong, chờ review |
-| M2 | Giữ ghế bằng Redis Lua | Chưa làm |
+| M1 | Bản gốc chỉ dùng PostgreSQL | Xong |
+| M2 | Giữ ghế bằng Redis Lua | Xong |
 | M3 | Expiry worker và outbox | Chưa làm |
 | M4 | Fakepay, webhook, saga | Chưa làm |
 | M5 | Phòng chờ ảo, frontend | Chưa làm |
@@ -164,8 +173,9 @@ make load-hold                           # BUYER_MODE=vu để thử chế độ
 
 ## Hạn chế đã biết
 
-- Request song song cùng Idempotency-Key có thể nhận `409 SEATS_UNAVAILABLE` thay vì `409 IDEMPOTENCY_KEY_IN_PROGRESS`, cho đến khi có khoá Redis ở M2 ([ADR-005](docs/adr/005-idempotency-key.md)). Vẫn luôn chỉ tạo ra một đơn.
-- Chỉ có backend giữ ghế PostgreSQL. Booking từ chối chạy với `INVENTORY_BACKEND=redis` (M2) hoặc `REQUIRE_ADMISSION=true` (M5).
+- Booking từ chối chạy với `REQUIRE_ADMISSION=true` cho đến khi có phòng chờ (M5).
+- API tạo đơn cần Redis cho khoá idempotency, kể cả khi `INVENTORY_BACKEND=pg`. Redis không trả lời thì trả `503` ([ADR-005](docs/adr/005-idempotency-key.md)).
+- Chưa có reconcile (M8). Nếu Redis mất dữ liệu, ghế đang giữ sẽ bị coi là trống trong Redis dù đơn vẫn `HELD`. Lớp chặn cuối chống bán trùng là `UNIQUE` của bảng `tickets` khi thanh toán (M4).
 - Chưa có expiry worker (M3): đơn `HELD` quá hạn vẫn ở trạng thái `HELD` (dù ghế đã được giải phóng khi `seat_holds` hết hạn), nên người đó chưa tạo được đơn mới cho sự kiện cho đến khi tự huỷ đơn cũ.
 - Outbox đã được ghi nhưng chưa có relay đẩy lên Kafka (M3).
 - Chưa có thanh toán, nên response chưa có `payment_url` (M4).
