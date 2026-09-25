@@ -29,12 +29,34 @@ jobs:
             echo "Files need gofmt:"; echo "$unformatted"; exit 1
           fi
 
+      - uses: sqlc-dev/setup-sqlc@v5
+        with:
+          sqlc-version: '1.31.1'
+
+      - name: sqlc generated code is up to date
+        run: sqlc diff
+
+      # Integration-tagged files are vetted too, even though they run in the
+      # other job.
       - name: go vet
-        run: go vet ./...
+        run: go vet -tags=integration ./...
 
       # Version pinned by the `tool` directive in go.mod.
       - name: staticcheck
-        run: go tool staticcheck ./...
+        run: go tool staticcheck -tags=integration ./...
 
       - name: go test
         run: go test -race ./...
+
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      # testcontainers starts PostgreSQL through the runner's Docker daemon.
+      - name: go test (integration)
+        run: go test -race -count=1 -tags=integration ./...
