@@ -106,7 +106,7 @@ RUNS ?= 3
 bench-hold: .env ## Đo chuẩn kịch bản mở bán: RUNS lần (mặc định 3), reset DB + seed mỗi lần; BACKEND=pg|redis
 	./loadtest/bench_hold.sh $(BACKEND) $(RUNS)
 
-bench-relay: .env ## Đo throughput outbox relay: xả 50.000 dòng lên Kafka, 3 lần
+bench-relay: .env ## Đo throughput outbox relay: xả 200.000 dòng lên Kafka, 3 lần
 	./loadtest/bench_relay.sh
 
 bench: ## seed → k6 → invariants → tóm tắt
