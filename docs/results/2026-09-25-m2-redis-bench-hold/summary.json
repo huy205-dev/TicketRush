@@ -1,0 +1,118 @@
+{
+  "runs": 3,
+  "hold_requests": {
+    "median": 13595,
+    "min": 13509,
+    "max": 14541
+  },
+  "created": {
+    "median": 2430,
+    "min": 2389,
+    "max": 2433
+  },
+  "seats_unavailable": {
+    "median": 11165,
+    "min": 11120,
+    "max": 12108
+  },
+  "peak_rps": {
+    "median": 2901,
+    "min": 2775,
+    "max": 2971
+  },
+  "mean_rps": {
+    "median": 1350.9,
+    "min": 1211.8,
+    "max": 1510.6
+  },
+  "p50_ms": {
+    "median": 47.672,
+    "min": 44.034,
+    "max": 63.066
+  },
+  "p95_ms": {
+    "median": 502.16099999999966,
+    "min": 454.1595999999995,
+    "max": 542.12
+  },
+  "p99_ms": {
+    "median": 958.0793999999997,
+    "min": 764.5125199999999,
+    "max": 1099.7341999999994
+  },
+  "max_ms": {
+    "median": 2197.588,
+    "min": 2032.733,
+    "max": 2286.151
+  },
+  "error_rate": {
+    "median": 0,
+    "min": 0,
+    "max": 0
+  },
+  "p99_threshold_ok_runs": 0,
+  "invariants_ok_runs": 3,
+  "booking_log_errors": 0,
+  "per_run": [
+    {
+      "run": 1,
+      "hold_requests": 14541,
+      "created": 2433,
+      "seats_unavailable": 12108,
+      "other_errors": 0,
+      "peak_rps": 2775,
+      "mean_rps": 1211.8,
+      "p50_ms": 63.066,
+      "p95_ms": 542.12,
+      "p99_ms": 1099.7341999999994,
+      "max_ms": 2286.151,
+      "error_rate": 0,
+      "p99_threshold_ok": false,
+      "all_requests": 141118,
+      "orders": 2433,
+      "invariant_violations": 0,
+      "booking_log_errors": 0,
+      "k6_exit": 99
+    },
+    {
+      "run": 2,
+      "hold_requests": 13509,
+      "created": 2389,
+      "seats_unavailable": 11120,
+      "other_errors": 0,
+      "peak_rps": 2971,
+      "mean_rps": 1350.9,
+      "p50_ms": 44.034,
+      "p95_ms": 502.16099999999966,
+      "p99_ms": 958.0793999999997,
+      "max_ms": 2032.733,
+      "error_rate": 0,
+      "p99_threshold_ok": false,
+      "all_requests": 146814,
+      "orders": 2389,
+      "invariant_violations": 0,
+      "booking_log_errors": 0,
+      "k6_exit": 99
+    },
+    {
+      "run": 3,
+      "hold_requests": 13595,
+      "created": 2430,
+      "seats_unavailable": 11165,
+      "other_errors": 0,
+      "peak_rps": 2901,
+      "mean_rps": 1510.6,
+      "p50_ms": 47.672,
+      "p95_ms": 454.1595999999995,
+      "p99_ms": 764.5125199999999,
+      "max_ms": 2197.588,
+      "error_rate": 0,
+      "p99_threshold_ok": false,
+      "all_requests": 137100,
+      "orders": 2430,
+      "invariant_violations": 0,
+      "booking_log_errors": 0,
+      "k6_exit": 99
+    }
+  ]
+}

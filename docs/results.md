@@ -76,7 +76,7 @@ Dữ liệu thô (summary của k6, kết quả kiểm tra từng lần): [`docs
 
 - **Throughput ổn định, latency đuôi thì không.** RPS đỉnh chỉ lệch ±3% giữa các lần. p99 lệch từ 875 đến 1.504 ms, và riêng lần 1 chậm hơn rõ ở mọi phân vị. Vì vậy mọi so sánh đều dùng trung vị của 3 lần.
 - **Mỗi lần bán hết 5.000 ghế trong 12–16 giây** (lần 2 và 3 mất 12 giây, lần 1 chậm nhất mất 16 giây), với khoảng 2.440 đơn (trung bình khoảng 2 ghế mỗi đơn). Cứ 6 request giữ ghế thì khoảng 5 request nhận 409, vì các buyer tranh nhau những ghế còn trống cuối cùng.
-- **Chưa đạt mục tiêu** ≥ 5.000 req/s và p99 < 200 ms. Đây là con số để bản Redis ở M2 so sánh.
+- **Chưa đạt mục tiêu** ≥ 5.000 req/s và p99 < 200 ms. Phép so sánh với Redis ở M2 dùng số PG đo lại ở commit M2 (mục "So sánh PG và Redis"), không dùng bảng này.
 - **Chưa phân tích điểm nghẽn** (việc của M7). Giả thuyết cần kiểm chứng: pool 20 kết nối PostgreSQL bị chia sẻ với dev-login (mỗi vòng lặp là một `INSERT users`), và các request chờ khoá hàng trên những ghế bị tranh nhiều nhất.
 
 ### Lịch sử: đo đơn lẻ trước review M1 (quy trình cũ)
@@ -95,7 +95,38 @@ Mỗi cấu hình chỉ chạy một lần, DB được reset trước mỗi l�
 
 ## So sánh PG và Redis
 
-Chưa đo (M2). Sẽ dùng `make bench-hold BACKEND=redis` trên cùng máy và cùng cấu hình.
+2026-09-25, commit `0cc0197` (M2). Cả hai backend đều đo bằng `make bench-hold`: 3 lần mỗi backend, liên tiếp nhau trên cùng máy và cùng cấu hình như mục Baseline PG. PG được đo lại ở chính commit này, vì từ M2 mọi request tạo đơn đều đi qua khoá idempotency trong Redis (ADR-005), nên cả hai bên cùng chạy một phiên bản code.
+
+| Chỉ số (trung vị [min–max]) | PG | Redis | Thay đổi (trung vị) |
+|---|---|---|---|
+| Request giữ ghế | 14.652 [14.466–15.311] | 13.595 [13.509–14.541] | |
+| 201 (đơn tạo được) | 2.421 [2.410–2.435] | 2.430 [2.389–2.433] | |
+| RPS giữ ghế đỉnh | 2.070 [1.762–2.154] | 2.901 [2.775–2.971] | **+40%** |
+| RPS giữ ghế TB trên giây có tải | 1.178 [1.033–1.221] | 1.351 [1.212–1.511] | +15% |
+| p50 | 461,7 ms [446,2–489,3] | 47,7 ms [44,0–63,1] | **−90%** |
+| p95 | 973,6 ms [728,5–1.035,0] | 502,2 ms [454,2–542,1] | −48% |
+| p99 | 1.061,5 ms [959,3–1.115,5] | 958,1 ms [764,5–1.099,7] | −10% |
+| max | 2.205,1 ms [1.801,1–3.047,8] | 2.197,6 ms [2.032,7–2.286,2] | ≈ 0 |
+| Tỉ lệ lỗi | 0% | 0% | |
+| Ngưỡng p99 < 200 ms | 0/3 lần | 0/3 lần | |
+| Kiểm tra dữ liệu | 3/3 lần đạt | 3/3 lần đạt (kèm so khớp Redis–PostgreSQL: 5.000/5.000 key đúng) | |
+
+Dữ liệu thô: [`docs/results/2026-09-25-m2-pg-bench-hold/`](results/2026-09-25-m2-pg-bench-hold/), [`docs/results/2026-09-25-m2-redis-bench-hold/`](results/2026-09-25-m2-redis-bench-hold/).
+
+### Nhận xét
+
+- **Redis thắng rõ ở phần thân của phân bố latency và ở throughput.**
+  - Trung vị latency giảm khoảng 10 lần.
+  - RPS đỉnh tăng 40%.
+  - Khoảng min–max của hai backend không chồng lên nhau ở RPS đỉnh, p50 và p95, nên đây không phải nhiễu.
+- **Đuôi p99 gần như không đổi**: −10%, và khoảng của hai bên chồng lên nhau. Với Redis, bước giữ ghế không còn chạm PostgreSQL, nhưng mỗi request tạo đơn vẫn phải qua PostgreSQL ít nhất một lần:
+  - tra Idempotency-Key (bước 4 của SPEC 9.1);
+  - với đơn giữ được ghế, thêm transaction ghi đơn;
+  - ngoài ra mỗi vòng lặp của k6 còn gọi dev-login, tức là một câu `INSERT users`.
+
+  Tất cả dùng chung pool 20 kết nối. Giả thuyết là đuôi latency đến từ việc chờ kết nối trong pool này và từ việc k6 tranh CPU với booking trên cùng máy. **Chưa kiểm chứng**; việc tìm điểm nghẽn thuộc M7.
+- **Vẫn chưa đạt mục tiêu** ≥ 5.000 req/s và p99 < 200 ms ở cả hai backend.
+- **Chi phí của khoá idempotency** lên backend PG, so với baseline M1 (commit `99d3e6d`): RPS đỉnh 2.070 so với 2.124, p50 462 ms so với 399 ms, p99 1.062 ms so với 971 ms. Mức chênh này nằm trong độ dao động quan sát được giữa các lần đo, nên chưa thể tách riêng ảnh hưởng của khoá.
 
 ## Tìm và sửa điểm nghẽn
 
