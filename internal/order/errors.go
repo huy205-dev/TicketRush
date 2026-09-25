@@ -13,6 +13,13 @@ var (
 	ErrIdempotencyKeyReused = errors.New("idempotency key reused with a different request")
 	ErrNotFound             = errors.New("order not found")
 	ErrNotCancellable       = errors.New("order cannot be cancelled")
+
+	// ErrIdempotencyKeyInProgress means another request with the same
+	// Idempotency-Key is still being processed (ADR-005).
+	ErrIdempotencyKeyInProgress = errors.New("a request with this idempotency key is in progress")
+	// ErrTemporarilyUnavailable means a dependency needed to process the
+	// request safely did not answer; the client should retry later.
+	ErrTemporarilyUnavailable = errors.New("temporarily unavailable")
 )
 
 // ValidationError explains which input was rejected. It matches

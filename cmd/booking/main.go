@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/huy205-dev/ticketrush/internal/auth"
 	"github.com/huy205-dev/ticketrush/internal/catalog"
@@ -86,9 +88,10 @@ func run(ctx context.Context, lookupEnv func(string) (string, bool), stdout io.W
 		httpx.Check{Name: "redis", Fn: func(ctx context.Context) error { return rdb.Ping(ctx).Err() }},
 	)
 
-	inv := inventory.NewPG(pool)
+	inv := newInventory(cfg, pool, rdb, logger)
 	cat := catalog.NewService(pool, inv)
-	orders := order.NewService(pool, cat, inv, cfg.HoldTTL, cfg.HoldGrace, logger)
+	orders := order.NewService(pool, cat, inv, redisx.NewLocker(rdb),
+		order.Config{HoldTTL: cfg.HoldTTL, HoldGrace: cfg.HoldGrace}, logger)
 	tokens := auth.NewTokens(cfg.JWTSecret, auth.AccessTokenTTL)
 	api := newAPI(logger, pool, tokens, cat, orders, cfg.IsDev())
 
@@ -118,13 +121,19 @@ func run(ctx context.Context, lookupEnv func(string) (string, bool), stdout io.W
 // checkSupported rejects settings whose implementation belongs to a later
 // milestone, rather than silently running without them.
 func checkSupported(cfg *config.Config) error {
-	if cfg.InventoryBackend != config.BackendPG {
-		return fmt.Errorf("INVENTORY_BACKEND=%s is not implemented yet (M2); set INVENTORY_BACKEND=pg", cfg.InventoryBackend)
-	}
 	if cfg.RequireAdmission {
 		return errors.New("REQUIRE_ADMISSION=true needs the waiting room (M5); set REQUIRE_ADMISSION=false")
 	}
 	return nil
+}
+
+// newInventory picks the seat-holding backend (INVENTORY_BACKEND). Config
+// validation guarantees it is one of the two.
+func newInventory(cfg *config.Config, pool *pgxpool.Pool, rdb redis.UniversalClient, logger *slog.Logger) inventory.Inventory {
+	if cfg.InventoryBackend == config.BackendPG {
+		return inventory.NewPG(pool)
+	}
+	return inventory.NewRedis(rdb, logger)
 }
 
 func newRouter(logger *slog.Logger, health *httpx.Health, api *api) http.Handler {

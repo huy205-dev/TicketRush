@@ -41,7 +41,6 @@ func TestRunRejectsFeaturesOfLaterMilestones(t *testing.T) {
 		env     map[string]string
 		message string
 	}{
-		{"redis backend", map[string]string{"INVENTORY_BACKEND": "redis", "REQUIRE_ADMISSION": "false"}, "INVENTORY_BACKEND=redis is not implemented yet"},
 		{"admission", map[string]string{"INVENTORY_BACKEND": "pg", "REQUIRE_ADMISSION": "true"}, "REQUIRE_ADMISSION=true needs the waiting room"},
 	}
 	for _, tc := range tests {

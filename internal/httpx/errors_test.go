@@ -49,6 +49,8 @@ func TestWriteErrMapsBusinessErrors(t *testing.T) {
 		{&order.NotCancellableError{Status: order.StatusPaid}, 409, "ORDER_NOT_CANCELLABLE"},
 		{order.ErrNotFound, 404, "ORDER_NOT_FOUND"},
 		{fmt.Errorf("load: %w", catalog.ErrEventNotFound), 404, "EVENT_NOT_FOUND"},
+		{order.ErrIdempotencyKeyInProgress, 409, "IDEMPOTENCY_KEY_IN_PROGRESS"},
+		{fmt.Errorf("%w: lock: dial tcp: refused", order.ErrTemporarilyUnavailable), 503, "SERVICE_UNAVAILABLE"},
 		{errors.New("connection reset"), 500, CodeInternal},
 	}
 	for _, tc := range tests {
@@ -158,5 +160,20 @@ func TestDecodeJSON(t *testing.T) {
 				t.Errorf("error %v does not wrap ErrBadRequest", err)
 			}
 		})
+	}
+}
+
+func TestWriteErrSetsRetryAfter(t *testing.T) {
+	for err, want := range map[error]string{
+		order.ErrIdempotencyKeyInProgress: "1",
+		order.ErrTemporarilyUnavailable:   "1",
+		order.ErrSeatsUnavailable:         "",
+		errors.New("boom"):                "",
+	} {
+		rec := httptest.NewRecorder()
+		WriteErr(rec, httptest.NewRequest(http.MethodGet, "/", nil), discardLogger(), err)
+		if got := rec.Header().Get("Retry-After"); got != want {
+			t.Errorf("%v: Retry-After = %q, want %q", err, got, want)
+		}
 	}
 }

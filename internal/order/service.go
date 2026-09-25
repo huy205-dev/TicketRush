@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"time"
 
 	"github.com/google/uuid"
@@ -30,9 +31,28 @@ const (
 )
 
 // releaseTimeout bounds the best-effort release after a failed create or a
-// cancel. It runs detached from the request so a client disconnect does not
-// leave seats held until the hold expires.
+// cancel, and the unlock of the idempotency lock. Both run detached from the
+// request so a client disconnect does not leave seats or the key locked.
 const releaseTimeout = 5 * time.Second
+
+// idempotencyLockTTL bounds how long a crashed request can keep its
+// Idempotency-Key locked. It must exceed the longest request (booking's
+// WriteTimeout is 15s).
+const idempotencyLockTTL = 30 * time.Second
+
+// Locker grants short exclusive locks; see redisx.Locker.
+type Locker interface {
+	TryLock(ctx context.Context, key string, ttl time.Duration) (unlock func(context.Context) error, ok bool, err error)
+}
+
+// Config holds the timing settings of the service.
+type Config struct {
+	// HoldTTL is how long PostgreSQL accepts payment for a held order.
+	HoldTTL time.Duration
+	// HoldGrace is added to the inventory hold so no one can re-hold a seat
+	// before PostgreSQL considers the old order expired (SPEC.md 6.2).
+	HoldGrace time.Duration
+}
 
 // Order is an order with its seats.
 type Order struct {
@@ -67,15 +87,19 @@ type Service struct {
 	pool      *pgxpool.Pool
 	catalog   *catalog.Service
 	inv       inventory.Inventory
+	locks     Locker
 	holdTTL   time.Duration
 	holdGrace time.Duration
 	logger    *slog.Logger
 }
 
-// NewService wires the order service. holdTTL is how long PostgreSQL accepts
-// payment; the inventory hold lasts holdTTL+holdGrace (SPEC.md 6.2).
-func NewService(pool *pgxpool.Pool, cat *catalog.Service, inv inventory.Inventory, holdTTL, holdGrace time.Duration, logger *slog.Logger) *Service {
-	return &Service{pool: pool, catalog: cat, inv: inv, holdTTL: holdTTL, holdGrace: holdGrace, logger: logger}
+// NewService wires the order service. locks guards Idempotency-Keys against
+// concurrent use (ADR-005).
+func NewService(pool *pgxpool.Pool, cat *catalog.Service, inv inventory.Inventory, locks Locker, cfg Config, logger *slog.Logger) *Service {
+	return &Service{
+		pool: pool, catalog: cat, inv: inv, locks: locks,
+		holdTTL: cfg.HoldTTL, holdGrace: cfg.HoldGrace, logger: logger,
+	}
 }
 
 // Create places a HELD order (SPEC.md 9.1). The bool is false when the
@@ -104,8 +128,32 @@ func (s *Service) Create(ctx context.Context, userID int64, key uuid.UUID, req C
 	hash := requestHash(norm)
 	idemKey := key.String()
 
-	// The second round only runs when a concurrent request with the same key
-	// committed its order between our lookup and our insert.
+	// Only one request per key may run the create flow (ADR-005). If Redis
+	// cannot tell us whether another one is running, refuse rather than risk
+	// answering SEATS_UNAVAILABLE for the buyer's own seats (fail closed).
+	unlock, locked, err := s.locks.TryLock(ctx, idempotencyLockKey(userID, idemKey), idempotencyLockTTL)
+	if err != nil {
+		return nil, false, fmt.Errorf("%w: idempotency lock: %w", ErrTemporarilyUnavailable, err)
+	}
+	if !locked {
+		// Another request holds the key, or has just finished with it.
+		existing, existingHash, err := s.findByKey(ctx, userID, idemKey)
+		switch {
+		case err == nil && existingHash == hash:
+			return existing, false, nil
+		case err == nil:
+			return nil, false, ErrIdempotencyKeyReused
+		case errors.Is(err, pgx.ErrNoRows):
+			return nil, false, ErrIdempotencyKeyInProgress
+		default:
+			return nil, false, err
+		}
+	}
+	defer s.unlock(ctx, unlock)
+
+	// The lock is advisory: if it expired mid-request or Redis lost it, the
+	// UNIQUE (user_id, idempotency_key) constraint still admits one order and
+	// the second round below turns the loser into a replay.
 	for range 2 {
 		existing, existingHash, err := s.findByKey(ctx, userID, idemKey)
 		switch {
@@ -311,6 +359,20 @@ func (s *Service) release(ctx context.Context, eventID int64, seatIDs []string, 
 		s.logger.WarnContext(ctx, "release seats failed; they free up when the hold expires",
 			"err", err, "seat_ids", seatIDs)
 	}
+}
+
+func (s *Service) unlock(ctx context.Context, unlock func(context.Context) error) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), releaseTimeout)
+	defer cancel()
+	if err := unlock(ctx); err != nil {
+		// The lock expires on its own after idempotencyLockTTL.
+		s.logger.WarnContext(ctx, "release idempotency lock failed", "err", err)
+	}
+}
+
+// idempotencyLockKey is "idem:<userId>:<key>"; keys are scoped per user.
+func idempotencyLockKey(userID int64, idemKey string) string {
+	return "idem:" + strconv.FormatInt(userID, 10) + ":" + idemKey
 }
 
 func violatedConstraint(err error) string {
