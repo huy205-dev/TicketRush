@@ -20,14 +20,19 @@ import (
 	"github.com/huy205-dev/ticketrush/internal/auth"
 	"github.com/huy205-dev/ticketrush/internal/catalog"
 	"github.com/huy205-dev/ticketrush/internal/httpx"
-	"github.com/huy205-dev/ticketrush/internal/inventory"
 	"github.com/huy205-dev/ticketrush/internal/order"
+	"github.com/huy205-dev/ticketrush/internal/platform/config"
+	"github.com/huy205-dev/ticketrush/internal/platform/redisx"
 	"github.com/huy205-dev/ticketrush/internal/platform/testdb"
+	"github.com/huy205-dev/ticketrush/internal/platform/testredis"
 )
 
-var db *testdb.DB
+var (
+	db  *testdb.DB
+	rds *testredis.Redis
+)
 
-func TestMain(m *testing.M) { testdb.Main(m, &db) }
+func TestMain(m *testing.M) { testredis.MainWithDB(m, &db, &rds) }
 
 type client struct {
 	t     *testing.T
@@ -71,17 +76,22 @@ func decode[T any](t *testing.T, r response) T {
 	return v
 }
 
-func startServer(t *testing.T) (*client, int64) {
+// startServer runs the booking router on fresh storage with the given
+// inventory backend ("pg" or "redis").
+func startServer(t *testing.T, backend string) (*client, int64) {
 	t.Helper()
 	pool := db.New(t, 20)
+	rdb := rds.New(t)
 	eventID, err := catalog.Seed(context.Background(), pool, catalog.DemoEvent())
 	if err != nil {
 		t.Fatal(err)
 	}
 	logger := slog.New(slog.DiscardHandler)
-	inv := inventory.NewPG(pool)
+	cfg := &config.Config{InventoryBackend: backend}
+	inv := newInventory(cfg, pool, rdb, logger)
 	cat := catalog.NewService(pool, inv)
-	orders := order.NewService(pool, cat, inv, 10*time.Minute, 30*time.Second, logger)
+	orders := order.NewService(pool, cat, inv, redisx.NewLocker(rdb),
+		order.Config{HoldTTL: 10 * time.Minute, HoldGrace: 30 * time.Second}, logger)
 	a := newAPI(logger, pool, auth.NewTokens(strings.Repeat("k", 32), time.Hour), cat, orders, true)
 	a.seatMaps.ttl = 0 // always fresh, so the test sees its own changes
 
@@ -118,7 +128,13 @@ func seatStatus(t *testing.T, c *client, eventID int64, seat string) string {
 }
 
 func TestBookingFlowOverHTTP(t *testing.T) {
-	c, eventID := startServer(t)
+	for _, backend := range []string{"pg", "redis"} {
+		t.Run(backend, func(t *testing.T) { testBookingFlow(t, backend) })
+	}
+}
+
+func testBookingFlow(t *testing.T, backend string) {
+	c, eventID := startServer(t, backend)
 	eid := jsonInt(eventID)
 
 	t.Run("event", func(t *testing.T) {
@@ -171,6 +187,10 @@ func TestBookingFlowOverHTTP(t *testing.T) {
 		}
 		if got := seatStatus(t, c, eventID, "VIP-A-1"); got != "HELD" {
 			t.Errorf("VIP-A-1 is %s, want HELD", got)
+		}
+		m := decode[seatMapResponse](t, c.do("GET", "/v1/events/"+eid+"/seats", "", nil))
+		if want := backend == "redis"; (m.Version > 0) != want {
+			t.Errorf("seat map version = %d with backend %s", m.Version, backend)
 		}
 	})
 
@@ -248,18 +268,20 @@ func TestBookingFlowOverHTTP(t *testing.T) {
 	})
 }
 
-// ADR-005: ten parallel requests with one Idempotency-Key create one order;
-// once the winner has answered, the same request returns 200 with that order.
+// ADR-005: ten parallel requests with one Idempotency-Key create one order.
+// The others get 200 with that order or 409 IDEMPOTENCY_KEY_IN_PROGRESS with
+// Retry-After; once the winner has answered, the same request returns 200.
 func TestSameIdempotencyKeyInParallelOverHTTP(t *testing.T) {
-	c, eventID := startServer(t)
+	c, eventID := startServer(t, "redis")
 	c.login(77)
 	key := uuid.NewString()
 	body := `{"event_id":` + jsonInt(eventID) + `,"seat_ids":["CAT2-B-1","CAT2-B-2"]}`
 
 	type result struct {
-		status  int
-		orderID uuid.UUID
-		code    string
+		status     int
+		orderID    uuid.UUID
+		code       string
+		retryAfter string
 	}
 	const workers = 10
 	results := make([]result, workers)
@@ -282,7 +304,8 @@ func TestSameIdempotencyKeyInParallelOverHTTP(t *testing.T) {
 				Error   httpx.ErrorBody `json:"error"`
 			}
 			_ = json.NewDecoder(resp.Body).Decode(&payload)
-			results[i] = result{status: resp.StatusCode, orderID: payload.OrderID, code: payload.Error.Code}
+			results[i] = result{status: resp.StatusCode, orderID: payload.OrderID, code: payload.Error.Code,
+				retryAfter: resp.Header.Get("Retry-After")}
 		})
 	}
 	close(start)
@@ -308,11 +331,8 @@ func TestSameIdempotencyKeyInParallelOverHTTP(t *testing.T) {
 				t.Errorf("200 carried order %v, want %v", r.orderID, winner)
 			}
 		case http.StatusConflict:
-			// Until M2 a request that reaches the seats while the winner is
-			// still running sees them taken; M2 answers
-			// IDEMPOTENCY_KEY_IN_PROGRESS instead (ADR-005).
-			if r.code != "SEATS_UNAVAILABLE" {
-				t.Errorf("409 with code %s", r.code)
+			if r.code != "IDEMPOTENCY_KEY_IN_PROGRESS" || r.retryAfter != "1" {
+				t.Errorf("409 with code %s and Retry-After %q, want IDEMPOTENCY_KEY_IN_PROGRESS and 1", r.code, r.retryAfter)
 			}
 		default:
 			t.Errorf("unexpected status %d (%s)", r.status, r.code)
