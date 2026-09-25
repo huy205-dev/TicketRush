@@ -46,7 +46,13 @@ jobs:
         run: go tool staticcheck -tags=integration ./...
 
       - name: go test
-        run: go test -race ./...
+        run: |
+          set -o pipefail
+          go test -race ./... 2>&1 | tee test-output.txt
+
+      - name: report test failures
+        if: failure()
+        run: ./.github/report-test-failures.sh test-output.txt
 
   integration:
     runs-on: ubuntu-latest
@@ -57,6 +63,13 @@ jobs:
         with:
           go-version-file: go.mod
 
-      # testcontainers starts PostgreSQL through the runner's Docker daemon.
+      # testcontainers starts PostgreSQL, Redis and Redpanda through the
+      # runner's Docker daemon.
       - name: go test (integration)
-        run: go test -race -count=1 -tags=integration ./...
+        run: |
+          set -o pipefail
+          go test -race -count=1 -tags=integration ./... 2>&1 | tee test-output.txt
+
+      - name: report test failures
+        if: failure()
+        run: ./.github/report-test-failures.sh test-output.txt

@@ -68,11 +68,14 @@ func testExpiryFlow(t *testing.T, backend string) {
 	go func() { expiryDone <- order.NewExpirer(pool, inv, logger).Run(ctx, 200*time.Millisecond) }()
 
 	seats := []string{"VIP-A-7", "VIP-A-8"}
+	// Taken before Create: the hold is counted from the INSERT inside it, so
+	// a timestamp taken after Create returns could be up to Create's own
+	// duration late and make a correct expiry look early on a slow machine.
+	created := time.Now()
 	o, _, err := svc.Create(ctx, 42, uuid.New(), order.CreateRequest{EventID: eventID, SeatIDs: seats})
 	if err != nil {
 		t.Fatal(err)
 	}
-	created := time.Now()
 
 	// Wait for the worker to expire the order: not before 2s, soon after.
 	var status string
