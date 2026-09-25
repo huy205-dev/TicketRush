@@ -45,3 +45,9 @@ type Inventory interface {
 	// Status reports the state of each requested seat.
 	Status(ctx context.Context, eventID int64, seatIDs []string) (map[string]SeatStatus, error)
 }
+
+// Versioner is implemented by backends that count seat state changes, so
+// clients polling the seat map can tell whether anything changed.
+type Versioner interface {
+	SeatMapVersion(ctx context.Context, eventID int64) (int64, error)
+}

@@ -196,8 +196,8 @@ func (s *Service) SaleOpen(ctx context.Context, eventID int64) (bool, error) {
 
 // SeatMap is the seat layout with the current status of every seat.
 type SeatMap struct {
-	// Version increases whenever a seat changes state. The pg backend has no
-	// such counter and always reports 0; the Redis backend (M2) fills it.
+	// Version increases whenever a seat changes state. Backends without such
+	// a counter (pg) report 0.
 	Version int64
 	Seats   []SeatState
 }
@@ -214,11 +214,20 @@ func (s *Service) SeatMap(ctx context.Context, eventID int64) (*SeatMap, error) 
 	if err != nil {
 		return nil, err
 	}
+	// Read the version first: if a seat changes between the two reads the
+	// map is newer than its version and the next poll refreshes again, which
+	// is harmless. The other order could hide a change behind a new version.
+	var version int64
+	if v, ok := s.inv.(inventory.Versioner); ok {
+		if version, err = v.SeatMapVersion(ctx, eventID); err != nil {
+			return nil, fmt.Errorf("seat map version of event %d: %w", eventID, err)
+		}
+	}
 	status, err := s.inv.Status(ctx, eventID, ev.SeatIDs())
 	if err != nil {
 		return nil, fmt.Errorf("seat map of event %d: %w", eventID, err)
 	}
-	m := &SeatMap{Seats: make([]SeatState, len(ev.Seats))}
+	m := &SeatMap{Version: version, Seats: make([]SeatState, len(ev.Seats))}
 	for i, st := range ev.Seats {
 		m.Seats[i] = SeatState{Seat: st, Status: status[st.ID]}
 	}
