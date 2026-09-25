@@ -1,0 +1,64 @@
+# sqlc generates one package per domain package: internal/<pkg>/queries.sql
+# becomes internal/<pkg>/<pkg>db. Regenerate with `make sqlc`.
+version: "2"
+
+sql:
+  - engine: postgresql
+    schema: migrations
+    queries: internal/auth/queries.sql
+    gen:
+      # Shared settings are anchored here and merged into the other entries.
+      go: &go
+        package: authdb
+        out: internal/auth/authdb
+        sql_package: pgx/v5
+        emit_pointers_for_null_types: true
+        omit_unused_structs: true
+        overrides:
+          - db_type: uuid
+            go_type: github.com/google/uuid.UUID
+          - db_type: timestamptz
+            go_type: time.Time
+          - db_type: pg_catalog.interval
+            go_type: time.Duration
+          - db_type: timestamptz
+            nullable: true
+            go_type:
+              type: time.Time
+              pointer: true
+
+  - engine: postgresql
+    schema: migrations
+    queries: internal/catalog/queries.sql
+    gen:
+      go:
+        <<: *go
+        package: catalogdb
+        out: internal/catalog/catalogdb
+
+  - engine: postgresql
+    schema: migrations
+    queries: internal/inventory/queries.sql
+    gen:
+      go:
+        <<: *go
+        package: inventorydb
+        out: internal/inventory/inventorydb
+
+  - engine: postgresql
+    schema: migrations
+    queries: internal/order/queries.sql
+    gen:
+      go:
+        <<: *go
+        package: orderdb
+        out: internal/order/orderdb
+
+  - engine: postgresql
+    schema: migrations
+    queries: internal/outbox/queries.sql
+    gen:
+      go:
+        <<: *go
+        package: outboxdb
+        out: internal/outbox/outboxdb
