@@ -1,0 +1,8 @@
+info:orders|2430
+info:seats_in_held_orders|5000
+seat_in_two_held_orders|0
+order_total_mismatch|0
+order_without_held_event|0
+info:live_seat_holds|5000
+hold_without_held_order|0
+held_order_seat_without_hold|0
