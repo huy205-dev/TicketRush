@@ -12,6 +12,57 @@ import (
 	"time"
 )
 
+const expireDueOrders = `-- name: ExpireDueOrders :many
+WITH due AS (
+  SELECT id
+  FROM orders
+  WHERE status = 'HELD' AND hold_expires_at < now()
+  ORDER BY hold_expires_at
+  LIMIT $1::int
+  FOR UPDATE SKIP LOCKED
+)
+UPDATE orders o
+SET status = 'EXPIRED', updated_at = now()
+FROM due
+WHERE o.id = due.id AND o.status = 'HELD'
+RETURNING o.id, o.event_id, o.user_id, o.total_vnd
+`
+
+type ExpireDueOrdersRow struct {
+	ID       uuid.UUID
+	EventID  int64
+	UserID   int64
+	TotalVnd int64
+}
+
+// Moves up to batch_size HELD orders whose hold has passed (database clock)
+// to EXPIRED (SPEC.md 9.4). SKIP LOCKED lets several workers run side by
+// side and skips orders locked by a concurrent cancel or payment.
+func (q *Queries) ExpireDueOrders(ctx context.Context, batchSize int32) ([]ExpireDueOrdersRow, error) {
+	rows, err := q.db.Query(ctx, expireDueOrders, batchSize)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ExpireDueOrdersRow
+	for rows.Next() {
+		var i ExpireDueOrdersRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.EventID,
+			&i.UserID,
+			&i.TotalVnd,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const getOrder = `-- name: GetOrder :one
 SELECT id, event_id, user_id, status, total_vnd, idempotency_key, request_hash, hold_expires_at, created_at, updated_at FROM orders WHERE id = $1
 `
@@ -182,6 +233,39 @@ func (q *Queries) ListOrderSeats(ctx context.Context, orderID uuid.UUID) ([]List
 	for rows.Next() {
 		var i ListOrderSeatsRow
 		if err := rows.Scan(&i.SeatID, &i.PriceVnd); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listSeatsOfOrders = `-- name: ListSeatsOfOrders :many
+SELECT order_id, seat_id, price_vnd
+FROM order_seats
+WHERE order_id = ANY($1::uuid[])
+ORDER BY order_id, seat_id
+`
+
+type ListSeatsOfOrdersRow struct {
+	OrderID  uuid.UUID
+	SeatID   string
+	PriceVnd int64
+}
+
+func (q *Queries) ListSeatsOfOrders(ctx context.Context, orderIds []uuid.UUID) ([]ListSeatsOfOrdersRow, error) {
+	rows, err := q.db.Query(ctx, listSeatsOfOrders, orderIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListSeatsOfOrdersRow
+	for rows.Next() {
+		var i ListSeatsOfOrdersRow
+		if err := rows.Scan(&i.OrderID, &i.SeatID, &i.PriceVnd); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
