@@ -1,0 +1,74 @@
+# Local infrastructure for TicketRush. Start with `make up`, stop with `make down`.
+# Every image is multi-arch and runs natively on Apple Silicon.
+name: ticketrush
+
+services:
+  postgres:
+    image: postgres:16.15-alpine
+    environment:
+      # Local development credentials only; must match DATABASE_URL in .env.
+      POSTGRES_USER: ticketrush
+      POSTGRES_PASSWORD: ticketrush
+      POSTGRES_DB: ticketrush
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ticketrush -d ticketrush"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: redis:7.4.11-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  redpanda:
+    image: redpandadata/redpanda:v26.2.3
+    command:
+      - redpanda
+      - start
+      - --mode=dev-container
+      - --smp=1
+      - --memory=1G
+      # "internal" is for containers on the compose network, "external" for
+      # binaries running on the host (KAFKA_BROKERS=localhost:19092).
+      - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr=internal://redpanda:9092,external://localhost:19092
+      - --rpc-addr=redpanda:33145
+      - --advertise-rpc-addr=redpanda:33145
+      - --default-log-level=warn
+    ports:
+      - "19092:19092"
+      - "19644:9644" # admin API
+    volumes:
+      - redpanda:/var/lib/redpanda/data
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -E 'Healthy:.+true' || exit 1"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+
+  console:
+    image: redpandadata/console:v3.12.0
+    environment:
+      KAFKA_BROKERS: redpanda:9092
+      REDPANDA_ADMINAPI_ENABLED: "true"
+      REDPANDA_ADMINAPI_URLS: http://redpanda:9644
+    ports:
+      - "8088:8080" # booking owns 8080 on the host
+    depends_on:
+      redpanda:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  redpanda:
