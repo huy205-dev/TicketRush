@@ -6,12 +6,13 @@ Khi mở bán một concert, hàng chục nghìn người cùng bấm vào vài 
 
 Đặc tả đầy đủ: [SPEC.md](SPEC.md).
 
-> **Trạng thái:** xong **M2 – giữ ghế bằng Redis Lua**. Hệ thống đã có:
+> **Trạng thái:** xong **M3 – expiry worker và outbox**. Hệ thống đã có:
 > - giữ ghế bằng Redis (mặc định) hoặc PostgreSQL;
-> - tạo, xem, huỷ đơn với Idempotency-Key, dùng khoá Redis cho các request trùng đang chạy;
-> - số liệu so sánh PG và Redis.
+> - tạo, xem, huỷ đơn với Idempotency-Key;
+> - expiry worker đưa đơn quá hạn sang `EXPIRED` và nhả ghế;
+> - relay đẩy mọi sự kiện đơn hàng từ outbox lên Kafka.
 >
-> Chưa có: expiry worker, relay Kafka, thanh toán, phòng chờ.
+> Chưa có: thanh toán, xuất vé, phòng chờ.
 
 ## Demo
 
@@ -57,12 +58,15 @@ Chi tiết và nhận xét ở [docs/results.md](docs/results.md#so-sánh-pg-và
 
 Redis: đỉnh +40%, p50 −90%, p95 −48%, nhưng p99 chỉ −10%. Vẫn chưa đạt mục tiêu ≥ 5.000 req/s và p99 < 200 ms.
 
+Outbox relay (`make bench-relay`): xả 200.000 sự kiện lên Redpanda với trung vị **101.085 sự kiện/s** [81.682–106.001]. Relay không phải điểm nghẽn ([chi tiết](docs/results.md#outbox-relay)).
+
 ## Quyết định kỹ thuật
 
 Danh sách đầy đủ ở [docs/adr/](docs/adr/README.md).
 
 - [ADR-000](docs/adr/000-ban-goc-postgresql.md): làm bản gốc giữ ghế chỉ bằng PostgreSQL (`SELECT … FOR UPDATE`) trước khi dùng Redis.
 - [ADR-001](docs/adr/001-giu-ghe-bang-redis-lua.md): giữ ghế bằng script Lua trong Redis; hash tag theo sự kiện; `HOLD_GRACE`.
+- [ADR-002](docs/adr/002-transactional-outbox.md): transactional outbox + relay thay vì gửi Kafka trực tiếp; at-least-once; một relay để giữ thứ tự theo đơn.
 - [ADR-005](docs/adr/005-idempotency-key.md): Idempotency-Key: hash trên request đã chuẩn hoá. Khoá Redis cho request đang chạy trả `409 IDEMPOTENCY_KEY_IN_PROGRESS`; khi Redis không trả lời thì trả `503` (fail closed).
 - [ADR-006](docs/adr/006-lua-chon-khi-spec-chua-ro-m1.md): các lựa chọn khi SPEC chưa nói rõ ở M1.
 
@@ -96,7 +100,11 @@ make up            # postgres, redis, redpanda, redpanda console; chờ đến k
 make migrate       # tạo schema
 make seed          # sự kiện mẫu 5.000 ghế (sau make db-reset thì có id 1)
 make run-booking   # lần đầu tự tạo .env từ .env.example với secret ngẫu nhiên
+make run-relay     # terminal khác: outbox → Kafka (tạo topic orders.v1, tickets.v1 nếu thiếu)
+make run-expiry    # terminal khác: đơn HELD quá hạn → EXPIRED, nhả ghế
 ```
+
+Xem sự kiện trên Kafka: mở Redpanda Console tại http://localhost:8088, hoặc chạy `docker compose -f deploy/compose.yaml exec redpanda rpk topic consume orders.v1`.
 
 Thử một lượt mua:
 
@@ -137,7 +145,11 @@ Test tích hợp chạy trên PostgreSQL và Redis thật. Mỗi test có một 
 - 10 request song song cùng Idempotency-Key thì chỉ ra 1 đơn, và không request nào nhận `SEATS_UNAVAILABLE`;
 - luồng HTTP đầu–cuối.
 
-Ngoài ra có test riêng cho từng script Lua.
+Ngoài ra có:
+- test riêng cho từng script Lua;
+- test expiry worker (4 worker chạy song song không xử lý một đơn hai lần);
+- test relay trên Redpanda thật (đúng key và header, giữ thứ tự theo key, lỗi thì không mất dòng, 3 relay song song không gửi trùng);
+- test đầu–cuối trong `internal/e2e`: đơn giữ 2 giây chuyển `EXPIRED`, ghế trống, và `order.expired` xuất hiện trên Kafka.
 
 CI (GitHub Actions, [.github/workflows/ci.yaml](.github/workflows/ci.yaml)) có hai job:
 - lint + unit test: gofmt, `sqlc diff`, `go vet`, staticcheck, `go test -race`;
@@ -148,6 +160,7 @@ CI (GitHub Actions, [.github/workflows/ci.yaml](.github/workflows/ci.yaml)) có 
 ```sh
 make bench-hold BACKEND=redis   # đo chuẩn: 3 lần, tự reset DB + seed + chạy booking, in trung vị/min/max
 make bench-hold BACKEND=pg      # bản gốc để so sánh
+make bench-relay                # throughput outbox relay (200.000 dòng, 3 lần)
 
 # Hoặc chạy một lần với booking đang chạy sẵn:
 make db-reset seed && make run-booking   # terminal khác
@@ -163,7 +176,7 @@ make load-hold                           # BUYER_MODE=vu để thử chế độ
 | M0 | Khung dự án, hạ tầng local, healthz/readyz, CI | Xong |
 | M1 | Bản gốc chỉ dùng PostgreSQL | Xong |
 | M2 | Giữ ghế bằng Redis Lua | Xong |
-| M3 | Expiry worker và outbox | Chưa làm |
+| M3 | Expiry worker và outbox | Xong |
 | M4 | Fakepay, webhook, saga | Chưa làm |
 | M5 | Phòng chờ ảo, frontend | Chưa làm |
 | M6 | Quan sát hệ thống | Chưa làm |
@@ -176,8 +189,9 @@ make load-hold                           # BUYER_MODE=vu để thử chế độ
 - Booking từ chối chạy với `REQUIRE_ADMISSION=true` cho đến khi có phòng chờ (M5).
 - API tạo đơn cần Redis cho khoá idempotency, kể cả khi `INVENTORY_BACKEND=pg`. Redis không trả lời thì trả `503` ([ADR-005](docs/adr/005-idempotency-key.md)).
 - Chưa có reconcile (M8). Nếu Redis mất dữ liệu, ghế đang giữ sẽ bị coi là trống trong Redis dù đơn vẫn `HELD`. Lớp chặn cuối chống bán trùng là `UNIQUE` của bảng `tickets` khi thanh toán (M4).
-- Chưa có expiry worker (M3): đơn `HELD` quá hạn vẫn ở trạng thái `HELD` (dù ghế đã được giải phóng khi `seat_holds` hết hạn), nên người đó chưa tạo được đơn mới cho sự kiện cho đến khi tự huỷ đơn cũ.
-- Outbox đã được ghi nhưng chưa có relay đẩy lên Kafka (M3).
+- Chưa có consumer nào đọc Kafka (ticket, refunder, notifier từ M4). Sự kiện được gửi at-least-once, nên consumer sẽ phải khử trùng theo `event_id`.
+- Chạy nhiều relay cùng lúc có thể làm đảo thứ tự sự kiện của cùng một đơn; nên chạy một relay ([ADR-002](docs/adr/002-transactional-outbox.md)).
+- Worker (expiry, relay) chưa có endpoint health và metrics (M6, M9).
 - Chưa có thanh toán, nên response chưa có `payment_url` (M4).
 - Sự kiện và ghế được cache trong process suốt vòng đời của nó; seed lại với sơ đồ khác thì phải khởi động lại booking.
 - Cổng lắng nghe cố định theo SPEC (booking `:8080`), chưa cấu hình qua biến môi trường.
