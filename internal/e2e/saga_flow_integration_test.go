@@ -105,8 +105,9 @@ func TestPaymentSagaOverKafka(t *testing.T) {
 	}
 	done := make(map[string]chan error, len(workers))
 	for name, run := range workers {
-		done[name] = make(chan error, 1)
-		go func() { done[name] <- run(ctx) }()
+		ch := make(chan error, 1)
+		done[name] = ch
+		go func() { ch <- run(ctx) }()
 	}
 
 	status := func(id uuid.UUID) order.Status {
