@@ -6,13 +6,15 @@ Khi mở bán một concert, hàng chục nghìn người cùng bấm vào vài 
 
 Đặc tả đầy đủ: [SPEC.md](SPEC.md).
 
-> **Trạng thái:** xong **M3 – expiry worker và outbox**. Hệ thống đã có:
+> **Trạng thái:** xong **M4 – fakepay, webhook và saga**. Hệ thống đã có:
 > - giữ ghế bằng Redis (mặc định) hoặc PostgreSQL;
 > - tạo, xem, huỷ đơn với Idempotency-Key;
 > - expiry worker đưa đơn quá hạn sang `EXPIRED` và nhả ghế;
-> - relay đẩy mọi sự kiện đơn hàng từ outbox lên Kafka.
+> - relay đẩy mọi sự kiện đơn hàng từ outbox lên Kafka;
+> - thanh toán qua cổng giả lập fakepay (webhook trễ, trùng, gửi lại), đủ mọi nhánh của SPEC 9.3;
+> - xuất vé có QR, hoàn tiền khi không giao được vé, thông báo qua log hoặc Telegram.
 >
-> Chưa có: thanh toán, xuất vé, phòng chờ.
+> Chưa có: phòng chờ, frontend.
 
 ## Demo
 
@@ -73,6 +75,7 @@ Danh sách đầy đủ ở [docs/adr/](docs/adr/README.md).
 - [ADR-000](docs/adr/000-ban-goc-postgresql.md): làm bản gốc giữ ghế chỉ bằng PostgreSQL (`SELECT … FOR UPDATE`) trước khi dùng Redis.
 - [ADR-001](docs/adr/001-giu-ghe-bang-redis-lua.md): giữ ghế bằng script Lua trong Redis; hash tag theo sự kiện; `HOLD_GRACE`.
 - [ADR-002](docs/adr/002-transactional-outbox.md): transactional outbox + relay thay vì gửi Kafka trực tiếp; at-least-once; một relay để giữ thứ tự theo đơn.
+- [ADR-003](docs/adr/003-saga-va-bu-tru-bang-hoan-tien.md): saga dạng choreography; mọi nhánh webhook quyết định trong một transaction; bù trừ bằng hoàn tiền; idempotency ở từng bước.
 - [ADR-005](docs/adr/005-idempotency-key.md): Idempotency-Key: hash trên request đã chuẩn hoá. Khoá Redis cho request đang chạy trả `409 IDEMPOTENCY_KEY_IN_PROGRESS`; khi Redis không trả lời thì trả `503` (fail closed).
 - [ADR-006](docs/adr/006-lua-chon-khi-spec-chua-ro-m1.md): các lựa chọn khi SPEC chưa nói rõ ở M1.
 
@@ -83,9 +86,11 @@ Danh sách đầy đủ ở [docs/adr/](docs/adr/README.md).
 | POST | `/v1/auth/dev-login` | `{"user_id": 123}` → JWT 24 h. Chỉ bật khi `APP_ENV=dev` |
 | GET | `/v1/events/{id}` | Thông tin sự kiện, các khu và giá |
 | GET | `/v1/events/{id}/seats` | 5.000 ghế kèm trạng thái và `version`; cache 500 ms, gzip; `ETag` + `If-None-Match` → `304` |
-| POST | `/v1/orders` | Cần `Authorization` và `Idempotency-Key` (UUID). 201 tạo mới, 200 gửi lại, 409 `IDEMPOTENCY_KEY_IN_PROGRESS` khi request cùng key đang chạy |
-| GET | `/v1/orders/{id}` | Chỉ chủ đơn xem được |
+| POST | `/v1/orders` | Cần `Authorization` và `Idempotency-Key` (UUID). 201 tạo mới, 200 gửi lại, 409 `IDEMPOTENCY_KEY_IN_PROGRESS` khi request cùng key đang chạy. Có `payment_url` khi đơn `HELD` |
+| GET | `/v1/orders/{id}` | Chỉ chủ đơn xem được; kèm danh sách vé khi đã `TICKETED` |
 | POST | `/v1/orders/{id}/cancel` | Chỉ khi `HELD`; huỷ lại đơn đã huỷ vẫn trả 200 |
+| GET | `/v1/orders/{id}/tickets` | Vé đã xuất, kèm QR dạng PNG base64 |
+| POST | `/v1/webhooks/fakepay` | Không cần token; `X-Signature` = hex HMAC-SHA256 của raw body. Sai chữ ký trả 401, đã ghi nhận trả 200 (kể cả webhook trùng) |
 | GET | `/healthz`, `/readyz` | readyz kiểm tra PostgreSQL và Redis |
 
 Lỗi luôn có dạng `{"error": {"code", "message", "details"}}`. Bảng mã lỗi ở [internal/httpx/errors.go](internal/httpx/errors.go).
@@ -108,6 +113,10 @@ make seed          # sự kiện mẫu 5.000 ghế (sau make db-reset thì có i
 make run-booking   # lần đầu tự tạo .env từ .env.example với secret ngẫu nhiên
 make run-relay     # terminal khác: outbox → Kafka (tạo topic orders.v1, tickets.v1 nếu thiếu)
 make run-expiry    # terminal khác: đơn HELD quá hạn → EXPIRED, nhả ghế
+make run-fakepay   # terminal khác: cổng thanh toán giả lập trên :8090
+make run-ticket    # terminal khác: order.paid → sinh QR, đơn → TICKETED
+make run-refunder  # terminal khác: order.refund_requested → fakepay hoàn tiền
+make run-notifier  # terminal khác: log (hoặc Telegram) khi xuất vé, hoàn tiền
 ```
 
 Xem sự kiện trên Kafka: mở Redpanda Console tại http://localhost:8088, hoặc chạy `docker compose -f deploy/compose.yaml exec redpanda rpk topic consume orders.v1`.
@@ -119,13 +128,18 @@ TOKEN=$(curl -s -X POST localhost:8080/v1/auth/dev-login -d '{"user_id":123}' | 
 curl -s -X POST localhost:8080/v1/orders \
   -H "Authorization: Bearer $TOKEN" -H "Idempotency-Key: $(uuidgen)" \
   -d '{"event_id":1,"seat_ids":["VIP-A-12","VIP-A-13"]}'
+# Mở payment_url trong trình duyệt và bấm "Thanh toán thành công", rồi:
+curl -s localhost:8080/v1/orders/<order_id>/tickets -H "Authorization: Bearer $TOKEN"
 ```
+
+Các chế độ gây lỗi của fakepay (`FAKEPAY_DELAY_MS_*`, `FAKEPAY_DUPLICATE_RATE`, `FAKEPAY_LATE_RATE`, `FAKEPAY_5XX_RATE`) được liệt kê trong `.env.example`. Mặc định có 5% webhook đến trễ 11 phút; đặt `FAKEPAY_LATE_RATE=0` khi thử bằng tay.
 
 `/readyz` trả `200` khi kết nối được PostgreSQL và Redis, `503` nếu không (body chỉ ghi `ok`/`fail` cho từng phụ thuộc, lý do lỗi nằm trong log). `/healthz` luôn trả `200` khi process còn sống.
 
 | Dịch vụ | Địa chỉ |
 |---|---|
 | Booking API | http://localhost:8080 |
+| Fakepay | http://localhost:8090 |
 | PostgreSQL | `localhost:5432` (user/pass/db: `ticketrush`) |
 | Redis | `localhost:6379` |
 | Redpanda (Kafka API) | `localhost:19092` |
@@ -183,7 +197,7 @@ make load-hold                           # BUYER_MODE=vu để thử chế độ
 | M1 | Bản gốc chỉ dùng PostgreSQL | Xong |
 | M2 | Giữ ghế bằng Redis Lua | Xong |
 | M3 | Expiry worker và outbox | Xong |
-| M4 | Fakepay, webhook, saga | Chưa làm |
+| M4 | Fakepay, webhook, saga | Xong |
 | M5 | Phòng chờ ảo, frontend | Chưa làm |
 | M6 | Quan sát hệ thống | Chưa làm |
 | M7 | Test tải, kiểm tra bất biến | Chưa làm |
@@ -194,10 +208,11 @@ make load-hold                           # BUYER_MODE=vu để thử chế độ
 
 - Booking từ chối chạy với `REQUIRE_ADMISSION=true` cho đến khi có phòng chờ (M5).
 - API tạo đơn cần Redis cho khoá idempotency, kể cả khi `INVENTORY_BACKEND=pg`. Redis không trả lời thì trả `503` ([ADR-005](docs/adr/005-idempotency-key.md)).
-- Chưa có reconcile (M8). Nếu Redis mất dữ liệu, ghế đang giữ sẽ bị coi là trống trong Redis dù đơn vẫn `HELD`. Lớp chặn cuối chống bán trùng là `UNIQUE` của bảng `tickets` khi thanh toán (M4).
-- Chưa có consumer nào đọc Kafka (ticket, refunder, notifier từ M4). Sự kiện được gửi at-least-once, nên consumer sẽ phải khử trùng theo `event_id`.
+- Chưa có reconcile (M8). Nếu Redis mất dữ liệu, ghế đang giữ sẽ bị coi là trống trong Redis dù đơn vẫn `HELD`. Lớp chặn cuối chống bán trùng là `UNIQUE` của bảng `tickets` khi thanh toán; khi lớp này chặn, tiền được hoàn với lý do `SEAT_CONFLICT`.
+- fakepay sập thì refunder thử lại mãi ở record đó, và các sự kiện sau nó trên cùng partition phải chờ ([ADR-003](docs/adr/003-saga-va-bu-tru-bang-hoan-tien.md)).
+- Chưa có metric `double_sell_prevented_total`, `inventory_confirm_failures_total` (M6); hiện chỉ có log.
 - Chạy nhiều relay cùng lúc có thể làm đảo thứ tự sự kiện của cùng một đơn; nên chạy một relay ([ADR-002](docs/adr/002-transactional-outbox.md)).
-- Worker (expiry, relay) chưa có endpoint health và metrics (M6, M9).
-- Chưa có thanh toán, nên response chưa có `payment_url` (M4).
+- Worker (expiry, relay, ticket, refunder, notifier) chưa có endpoint health và metrics (M6, M9).
+- fakepay giữ trạng thái trong bộ nhớ; khởi động lại thì mất các thanh toán đã đăng ký và các webhook đang chờ gửi.
 - Sự kiện và ghế được cache trong process suốt vòng đời của nó; seed lại với sơ đồ khác thì phải khởi động lại booking.
 - Cổng lắng nghe cố định theo SPEC (booking `:8080`), chưa cấu hình qua biến môi trường.
