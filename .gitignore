@@ -8,8 +8,13 @@
 /dist/
 /booking
 /expiry
+/fakepay
+/notifier
+/refunder
 /relay
 /seed
+/ticket
+/waitingroom
 
 # Test and load-test output
 *.test
