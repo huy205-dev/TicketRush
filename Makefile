@@ -59,8 +59,8 @@ sqlc: ## Sinh code từ internal/*/queries.sql
 run-booking: .env ## Booking API trên :8080
 	$(LOAD_ENV) go run ./cmd/booking
 
-run-waitingroom: ## Waiting room trên :8081
-	$(call todo,M5)
+run-waitingroom: .env ## Phòng chờ trên :8081: vào hàng, SSE vị trí, worker cấp admission token
+	$(LOAD_ENV) go run ./cmd/waitingroom
 
 run-relay: .env ## Outbox relay: PostgreSQL outbox → Kafka (tạo topic nếu thiếu)
 	$(LOAD_ENV) go run ./cmd/relay

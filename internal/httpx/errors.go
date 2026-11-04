@@ -10,6 +10,7 @@ import (
 	"github.com/huy205-dev/ticketrush/internal/catalog"
 	"github.com/huy205-dev/ticketrush/internal/order"
 	"github.com/huy205-dev/ticketrush/internal/payment"
+	"github.com/huy205-dev/ticketrush/internal/queue"
 )
 
 // ErrBadRequest means the request body could not be parsed.
@@ -43,6 +44,7 @@ var errorMappings = []errorMapping{
 	{auth.ErrInvalidAdmission, http.StatusForbidden, "ADMISSION_REQUIRED", "Cần vào hàng chờ và được cho vào trước khi đặt vé", ""},
 	{order.ErrAdmissionAlreadyUsed, http.StatusForbidden, "ADMISSION_ALREADY_USED", "Lượt vào này đã dùng để tạo một đơn khác", ""},
 	{catalog.ErrEventNotFound, http.StatusNotFound, "EVENT_NOT_FOUND", "Không tìm thấy sự kiện", ""},
+	{queue.ErrNotQueued, http.StatusNotFound, "QUEUE_ENTRY_NOT_FOUND", "Không còn trong hàng chờ, hãy vào hàng lại", ""},
 	{order.ErrTemporarilyUnavailable, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Hệ thống tạm thời không xử lý được, vui lòng thử lại", "1"},
 }
 
