@@ -194,6 +194,16 @@ func (s *Service) SaleOpen(ctx context.Context, eventID int64) (bool, error) {
 	return open, nil
 }
 
+// OpenEventIDs lists the events whose sale has started, by the database
+// clock.
+func (s *Service) OpenEventIDs(ctx context.Context) ([]int64, error) {
+	ids, err := s.q.ListOpenEventIDs(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list open events: %w", err)
+	}
+	return ids, nil
+}
+
 // SeatMap is the seat layout with the current status of every seat.
 type SeatMap struct {
 	// Version increases whenever a seat changes state. Backends without such

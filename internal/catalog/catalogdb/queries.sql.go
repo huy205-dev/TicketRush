@@ -87,6 +87,35 @@ func (q *Queries) IsSaleOpen(ctx context.Context, id int64) (bool, error) {
 	return open, err
 }
 
+const listOpenEventIDs = `-- name: ListOpenEventIDs :many
+SELECT id
+FROM events
+WHERE sale_opens_at <= now()
+ORDER BY id
+`
+
+// Events whose sale has started by the database clock: the only ones the
+// waiting room admits buyers to.
+func (q *Queries) ListOpenEventIDs(ctx context.Context) ([]int64, error) {
+	rows, err := q.db.Query(ctx, listOpenEventIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listSeats = `-- name: ListSeats :many
 SELECT seat_id, zone, row_label, seat_no, price_vnd
 FROM seats

@@ -30,3 +30,11 @@ RETURNING id;
 -- name: InsertSeats :copyfrom
 INSERT INTO seats (event_id, seat_id, zone, row_label, seat_no, price_vnd)
 VALUES ($1, $2, $3, $4, $5, $6);
+
+-- name: ListOpenEventIDs :many
+-- Events whose sale has started by the database clock: the only ones the
+-- waiting room admits buyers to.
+SELECT id
+FROM events
+WHERE sale_opens_at <= now()
+ORDER BY id;
