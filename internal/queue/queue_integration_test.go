@@ -257,3 +257,27 @@ func TestJoinConcurrently(t *testing.T) {
 		t.Errorf("queue length = %d, want 1", n)
 	}
 }
+
+// BenchmarkAdmit measures one worker tick admitting 200 buyers (the default
+// ADMIT_BATCH): reading the queue head, signing 200 tokens and storing them.
+// Run: go test -tags=integration -run '^$' -bench Admit ./internal/queue
+func BenchmarkAdmit(b *testing.B) {
+	const batch = 200
+	rdb := containers.Redis.New(b)
+	q := queue.New(rdb)
+	w := newWorker(rdb, batch)
+	ctx := context.Background()
+	for i := 0; b.Loop(); i++ {
+		b.StopTimer()
+		for u := range batch {
+			if _, err := q.Join(ctx, eventID, int64(i*batch+u+1)); err != nil {
+				b.Fatal(err)
+			}
+		}
+		b.StartTimer()
+		n, err := w.Admit(ctx, eventID)
+		if err != nil || n != batch {
+			b.Fatalf("admitted %d, %v; want %d", n, err, batch)
+		}
+	}
+}
