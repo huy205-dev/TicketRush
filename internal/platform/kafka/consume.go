@@ -36,6 +36,11 @@ const (
 	retryMax = 5 * time.Second
 )
 
+// commitTimeout bounds the offset commit after a batch. The commit runs
+// detached from shutdown, so a stop right after a batch still records it
+// instead of redelivering the whole batch to the next member.
+const commitTimeout = 5 * time.Second
+
 // NewConsumer returns a client in consumer group that reads topics from the
 // oldest retained record when the group is new, commits only when told to,
 // and does not rebalance while a polled batch is being processed.
@@ -54,6 +59,12 @@ func NewConsumer(brokers []string, group string, topics ...string) (*kgo.Client,
 // (all events of one order share a partition). Offsets are committed after
 // the whole polled batch succeeded; if ctx is cancelled mid-batch nothing is
 // committed and the batch is redelivered later.
+//
+// A record that keeps failing is retried in place, so it holds up every
+// partition this member owns, not only its own, and blocks group rebalances
+// while it does. Past the group's rebalance timeout the member is evicted and
+// another member may get the same batch concurrently; handlers must be
+// idempotent under concurrent duplicates too.
 func Consume(ctx context.Context, cl *kgo.Client, logger *slog.Logger, handle Handler) error {
 	// Every poll blocks rebalances until AllowRebalance, including a poll
 	// that returned because ctx was cancelled; leaving the group waits for
@@ -73,7 +84,10 @@ func Consume(ctx context.Context, cl *kgo.Client, logger *slog.Logger, handle Ha
 				return nil // cancelled; leave the batch uncommitted
 			}
 		}
-		if err := cl.CommitUncommittedOffsets(ctx); err != nil && ctx.Err() == nil {
+		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), commitTimeout)
+		err := cl.CommitUncommittedOffsets(cctx)
+		cancel()
+		if err != nil {
 			logger.WarnContext(ctx, "commit offsets failed; the batch may be redelivered", "err", err)
 		}
 		cl.AllowRebalance()
@@ -89,7 +103,8 @@ func process(ctx context.Context, logger *slog.Logger, handle Handler, r *kgo.Re
 		if err == nil {
 			return true
 		}
-		attrs := []any{"topic", r.Topic, "partition", r.Partition, "offset", r.Offset, "key", string(r.Key), "err", err}
+		// Every topic in this system is keyed by order_id (SPEC.md 10).
+		attrs := []any{"topic", r.Topic, "partition", r.Partition, "offset", r.Offset, "order_id", string(r.Key), "err", err}
 		if IsPermanent(err) {
 			logger.ErrorContext(ctx, "skipping record that cannot be processed", attrs...)
 			return true
