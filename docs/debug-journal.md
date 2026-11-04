@@ -12,6 +12,29 @@ Mỗi lỗi khó gặp phải được ghi theo mẫu dưới đây, mới nhấ
 **Bài học:**
 ```
 
+## 2026-11-04 — Expiry worker xoá hold của một lần thanh toán trễ
+
+**Triệu chứng:** review độc lập M4 mô tả một kịch bản (hai lượt review tìm ra, bốn lần kiểm chứng xác nhận). Một đơn đã hết hạn được trả tiền muộn, PostgreSQL xuất vé cho người trả trễ, nhưng Redis lại để người mua khác giữ ghế đó. Không có test nào bắt được.
+
+**Cách điều tra:**
+1. Đọc lại hai quy tắc của SPEC:
+   - 9.4: expiry *sau commit* mới gọi `release.lua` cho ghế của từng đơn;
+   - 9.3 bước 6: tiền về trễ thì giữ lại ghế với *cùng* `orderId`.
+   Hai bước cùng làm việc với giá trị `held:<orderId>`. `release.lua` chỉ so sánh giá trị đó, nên không phân biệt được hold cũ với hold mới.
+2. Viết test ép đúng thứ tự, dùng một wrapper `Inventory` tạm dừng `Release` của expiry và `Confirm` của webhook:
+   1. expiry commit `EXPIRED`;
+   2. webhook giữ lại ghế;
+   3. expiry `release`;
+   4. người mua khác tạo đơn trên ghế đó;
+   5. webhook `confirm`.
+3. Kết quả với code cũ, backend Redis: người mua khác tạo đơn thành công, ghế ở trạng thái `HELD` (của người đó) thay vì `SOLD`, dù PostgreSQL đã có vé của người trả trễ. Backend PG không bị ở thứ tự này, vì vé đã commit trước `confirm`, và `TakenSeats` của người mua sau nhìn thấy vé.
+
+**Nguyên nhân gốc:** hai thao tác cùng một khoá Redis (`held:<orderId>`) chạy ở hai process, và không có gì xếp thứ tự giữa chúng. Webhook giữ khoá đơn trong PostgreSQL, nhưng expiry nhả ghế sau khi đã thả khoá.
+
+**Cách sửa:** vẫn nhả ghế sau commit như SPEC 9.4, nhưng trong một transaction thứ hai khoá lại các đơn vừa hết hạn (`LockOrderStatuses`, `FOR UPDATE` theo thứ tự id), và bỏ qua đơn đã thành `PAID`/`TICKETED`. Test fail với code cũ và pass với code mới.
+
+**Bài học:** "sau commit" chưa đủ để an toàn khi một bên khác cũng ghi vào cùng khoá Redis. Cần xếp thứ tự bằng chính khoá của nguồn sự thật. Test race nên ép từng thứ tự bằng chốt chặn, đừng hy vọng chạy nhiều lần sẽ gặp.
+
 ## 2026-09-25 — Consumer Kafka treo mãi khi dừng (franz-go `BlockRebalanceOnPoll`)
 
 **Triệu chứng:** test e2e saga ở M4 chạy đúng hết phần nghiệp vụ (đơn TICKETED, 2 lần hoàn tiền, 3 thông báo), nhưng sau khi cancel context thì `kafka.Run` của notifier không trả về trong 15 s. Nếu không phát hiện, mọi consumer (ticket, refunder, notifier) sẽ treo khi nhận SIGTERM cho đến khi bị kill.

@@ -208,11 +208,14 @@ make load-hold                           # BUYER_MODE=vu để thử chế độ
 
 - Booking từ chối chạy với `REQUIRE_ADMISSION=true` cho đến khi có phòng chờ (M5).
 - API tạo đơn cần Redis cho khoá idempotency, kể cả khi `INVENTORY_BACKEND=pg`. Redis không trả lời thì trả `503` ([ADR-005](docs/adr/005-idempotency-key.md)).
-- Chưa có reconcile (M8). Nếu Redis mất dữ liệu, ghế đang giữ sẽ bị coi là trống trong Redis dù đơn vẫn `HELD`. Lớp chặn cuối chống bán trùng là `UNIQUE` của bảng `tickets` khi thanh toán; khi lớp này chặn, tiền được hoàn với lý do `SEAT_CONFLICT`.
-- fakepay sập thì refunder thử lại mãi ở record đó, và các sự kiện sau nó trên cùng partition phải chờ ([ADR-003](docs/adr/003-saga-va-bu-tru-bang-hoan-tien.md)).
+- Chưa có reconcile (M8).
+  - Redis trong compose không có volume, nên `make down` rồi `make up` là mất dữ liệu Redis. Ghế đang giữ, và cả ghế **đã bán**, sẽ hiện là trống dù PostgreSQL vẫn có đơn `HELD` hoặc vé.
+  - Lớp chặn cuối chống bán trùng là `UNIQUE` của bảng `tickets` khi thanh toán. Khi lớp này chặn, tiền được hoàn với lý do `SEAT_CONFLICT`, nhưng người mua đã phải trả tiền trước. Sau khi mất Redis, chạy `make db-reset seed` để bắt đầu lại sạch; lệnh này giờ xoá cả Redis.
+- Một record lỗi mãi chặn cả consumer instance. Ví dụ fakepay sập thì refunder thử lại mãi ở một refund: mọi partition của instance đó phải chờ, và rebalance bị chặn ([ADR-003](docs/adr/003-saga-va-bu-tru-bang-hoan-tien.md)).
+- Tiền chỉ được đảm bảo hoàn cho các webhook booking đã ghi nhận. Nếu fakepay bỏ cuộc sau 8 lần gửi lại (khoảng 255 s) trong lúc booking hoặc DB còn hỏng, giao dịch đó mất; chưa có đối soát với cổng thanh toán.
 - Chưa có metric `double_sell_prevented_total`, `inventory_confirm_failures_total` (M6); hiện chỉ có log.
 - Chạy nhiều relay cùng lúc có thể làm đảo thứ tự sự kiện của cùng một đơn; nên chạy một relay ([ADR-002](docs/adr/002-transactional-outbox.md)).
 - Worker (expiry, relay, ticket, refunder, notifier) chưa có endpoint health và metrics (M6, M9).
-- fakepay giữ trạng thái trong bộ nhớ; khởi động lại thì mất các thanh toán đã đăng ký và các webhook đang chờ gửi.
+- fakepay giữ trạng thái trong bộ nhớ; khởi động lại thì mất các thanh toán đã đăng ký và các webhook đang chờ gửi. fakepay chỉ gửi webhook về `PUBLIC_BASE_URL`, và chỉ dùng cho dev, không mở ra Internet.
 - Sự kiện và ghế được cache trong process suốt vòng đời của nó; seed lại với sơ đồ khác thì phải khởi động lại booking.
 - Cổng lắng nghe cố định theo SPEC (booking `:8080`), chưa cấu hình qua biến môi trường.
