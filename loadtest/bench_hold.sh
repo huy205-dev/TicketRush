@@ -29,16 +29,20 @@ for tool in k6 jq goose docker curl lsof go; do
   command -v "$tool" >/dev/null || { echo "missing tool: $tool" >&2; exit 1; }
 done
 [ -f .env ] || { echo ".env is missing; run: make .env" >&2; exit 1; }
-if lsof -nP -iTCP:8080 -sTCP:LISTEN >/dev/null 2>&1; then
-  echo "port 8080 is in use; stop the running booking service first" >&2
-  exit 1
-fi
+for port in 8080 8090; do
+  if lsof -nP -iTCP:$port -sTCP:LISTEN >/dev/null 2>&1; then
+    echo "port $port is in use; stop the running booking/fakepay service first" >&2
+    exit 1
+  fi
+done
 
 set -a
 . ./.env
 set +a
 export INVENTORY_BACKEND=$backend # after .env so it takes precedence
 export BUYER_MODE=iteration
+# The scenario drives booking directly, without the waiting room (SPEC.md 11).
+export REQUIRE_ADMISSION=false
 # SCRIPT picks the scenario: hold_contention.js (default, revalidates the seat
 # map with ETag) or hold_contention_full.js (downloads it every time).
 script=${SCRIPT:-loadtest/hold_contention.js}
@@ -62,8 +66,12 @@ mkdir -p "$out"
 echo "building booking and seed at $commit"
 go build -o "$out/booking" ./cmd/booking
 go build -o "$out/seed" ./cmd/seed
+# Every 201 registers its payment with fakepay (SPEC.md 9.1 step 9), so each
+# run starts its own fakepay; nothing ever pays, so no webhook is sent.
+go build -o "$out/fakepay" ./cmd/fakepay
 
 booking_pid=""
+fakepay_pid=""
 sampler_pid=""
 stop_booking() {
   if [ -n "$sampler_pid" ]; then kill "$sampler_pid" 2>/dev/null || true; fi
@@ -71,6 +79,11 @@ stop_booking() {
     kill -TERM "$booking_pid" 2>/dev/null || true
     wait "$booking_pid" 2>/dev/null || true
     booking_pid=""
+  fi
+  if [ -n "$fakepay_pid" ]; then
+    kill -TERM "$fakepay_pid" 2>/dev/null || true
+    wait "$fakepay_pid" 2>/dev/null || true
+    fakepay_pid=""
   fi
 }
 trap stop_booking EXIT
@@ -130,8 +143,16 @@ for i in $(seq 1 "$runs"); do
   "${compose[@]}" exec -T redis redis-cli FLUSHALL >/dev/null
   "$out/seed" >/dev/null
 
+  "$out/fakepay" >"$out/run-$i-fakepay.log" 2>&1 &
+  fakepay_pid=$!
   "$out/booking" >"$out/run-$i-booking.log" 2>&1 &
   booking_pid=$!
+  ready=""
+  for _ in $(seq 1 50); do
+    if curl -sf http://localhost:8090/healthz >/dev/null; then ready=1; break; fi
+    sleep 0.2
+  done
+  [ -n "$ready" ] || { echo "fakepay did not become ready; see $out/run-$i-fakepay.log" >&2; exit 1; }
   ready=""
   for _ in $(seq 1 50); do
     if curl -sf http://localhost:8080/readyz >/dev/null; then ready=1; break; fi
@@ -290,6 +311,7 @@ jq -r \
   "- Máy: \($machine); Docker VM: \($docker_vm)",
   "- \($pg); booking: \($booking)",
   "- k6 \($k6v), kịch bản `\($script)`, BUYER_MODE=iteration, \($k6p); reset DB + flush Redis + seed trước mỗi lần",
+  "- REQUIRE_ADMISSION=false; mỗi đơn 201 gọi fakepay cục bộ (cùng commit) để đăng ký thanh toán, thời gian này nằm trong latency 201 và được tách riêng ở payment_ms",
   "",
   "Số chính: latency phía server, đo trong booking cho POST /v1/orders (từ log booking, không tính mạng và hàng đợi của máy tạo tải):",
   "",

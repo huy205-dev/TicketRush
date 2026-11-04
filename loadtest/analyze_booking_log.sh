@@ -2,8 +2,9 @@
 # Breaks down server-side latency of POST /v1/orders from a booking log
 # (JSON lines): for 201, 409 and other statuses, the p50/p95/p99 of the whole
 # request and of the time spent waiting for a pgxpool connection
-# (db_acquire_ms), running PostgreSQL statements (db_query_ms) and talking to
-# Redis (redis_ms). Also sums the "pgxpool stats" lines.
+# (db_acquire_ms), running PostgreSQL statements (db_query_ms), talking to
+# Redis (redis_ms) and registering the payment with fakepay (payment_ms, on
+# 201 only). Also sums the "pgxpool stats" lines.
 #
 # Usage: loadtest/analyze_booking_log.sh <booking.log>   (prints JSON)
 set -euo pipefail
@@ -18,6 +19,7 @@ jq -s '
     db_acquire_ms: dist(.db_acquire_ms),
     db_query_ms: dist(.db_query_ms),
     redis_ms: dist(.redis_ms),
+    payment_ms: dist(.payment_ms),
     share_waiting_for_db: (if length == 0 then null else ([.[] | .db_acquire_ms // 0] | add) / ([.[].duration_ms] | add) end),
     with_db: ([.[] | select((.db_acquires // 0) > 0)] | length)
   };
