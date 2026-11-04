@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"time"
 
@@ -26,10 +25,10 @@ type Sender interface {
 }
 
 // Seen remembers which events were already notified, so a redelivered
-// record does not send the same message twice.
+// record does not send the same message twice. Keys come from DedupeKey.
 type Seen interface {
-	Seen(ctx context.Context, eventID int64) (bool, error)
-	Mark(ctx context.Context, eventID int64) error
+	Seen(ctx context.Context, key string) (bool, error)
+	Mark(ctx context.Context, key string) error
 }
 
 // Notifier turns ticket.issued and order.refunded into messages.
@@ -54,7 +53,8 @@ func (n *Notifier) Handler() kafka.Handler {
 // marked after sending: a crash in between sends it again, which is better
 // than never telling the buyer.
 func (n *Notifier) Notify(ctx context.Context, ev events.OrderEvent) error {
-	seen, err := n.seen.Seen(ctx, ev.EventID)
+	key := DedupeKey(ev)
+	seen, err := n.seen.Seen(ctx, key)
 	if err != nil {
 		return err
 	}
@@ -68,10 +68,22 @@ func (n *Notifier) Notify(ctx context.Context, ev events.OrderEvent) error {
 	if err := n.sender.Send(ctx, text); err != nil {
 		return err
 	}
-	if err := n.seen.Mark(ctx, ev.EventID); err != nil {
+	if err := n.seen.Mark(ctx, key); err != nil {
 		n.logger.WarnContext(ctx, "remember notified event failed; a redelivery would notify again", "err", err)
 	}
 	return nil
+}
+
+// DedupeKey names what a message is about: the tickets of an order, or one
+// refunded payment. It is built from ids that survive a database reset or
+// restore (order ids are UUIDv7), unlike the outbox event_id, whose sequence
+// starts again at 1 and would make new events look already notified.
+func DedupeKey(ev events.OrderEvent) string {
+	key := ev.EventType + ":" + ev.OrderID.String()
+	if ev.ProviderTxnID != "" {
+		key += ":" + ev.ProviderTxnID
+	}
+	return key
 }
 
 // Message is the text sent for ev, in Vietnamese for the buyer, or "" for
@@ -143,17 +155,17 @@ func (t *Telegram) Send(ctx context.Context, text string) error {
 // redelivers at most the batch that was not committed yet.
 const seenTTL = 7 * 24 * time.Hour
 
-// RedisSeen keeps "notified:<event_id>" keys.
+// RedisSeen keeps "notified:<DedupeKey>" keys.
 type RedisSeen struct{ rdb *redis.Client }
 
 // NewRedisSeen returns a Seen backed by rdb.
 func NewRedisSeen(rdb *redis.Client) RedisSeen { return RedisSeen{rdb: rdb} }
 
-func seenKey(eventID int64) string { return "notified:" + strconv.FormatInt(eventID, 10) }
+func seenKey(key string) string { return "notified:" + key }
 
 // Seen implements Seen.
-func (s RedisSeen) Seen(ctx context.Context, eventID int64) (bool, error) {
-	n, err := s.rdb.Exists(ctx, seenKey(eventID)).Result()
+func (s RedisSeen) Seen(ctx context.Context, key string) (bool, error) {
+	n, err := s.rdb.Exists(ctx, seenKey(key)).Result()
 	if err != nil {
 		return false, fmt.Errorf("check notified: %w", err)
 	}
@@ -161,8 +173,8 @@ func (s RedisSeen) Seen(ctx context.Context, eventID int64) (bool, error) {
 }
 
 // Mark implements Seen.
-func (s RedisSeen) Mark(ctx context.Context, eventID int64) error {
-	if err := s.rdb.Set(ctx, seenKey(eventID), 1, seenTTL).Err(); err != nil {
+func (s RedisSeen) Mark(ctx context.Context, key string) error {
+	if err := s.rdb.Set(ctx, seenKey(key), 1, seenTTL).Err(); err != nil {
 		return fmt.Errorf("mark notified: %w", err)
 	}
 	return nil

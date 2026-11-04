@@ -17,10 +17,10 @@ import (
 	"github.com/huy205-dev/ticketrush/internal/events"
 )
 
-type memSeen map[int64]bool
+type memSeen map[string]bool
 
-func (m memSeen) Seen(_ context.Context, id int64) (bool, error) { return m[id], nil }
-func (m memSeen) Mark(_ context.Context, id int64) error         { m[id] = true; return nil }
+func (m memSeen) Seen(_ context.Context, key string) (bool, error) { return m[key], nil }
+func (m memSeen) Mark(_ context.Context, key string) error         { m[key] = true; return nil }
 
 type recorder struct {
 	sent []string
@@ -78,7 +78,7 @@ func TestNotifyRetriesAfterSendFailure(t *testing.T) {
 	if err := n.Notify(context.Background(), ev); err == nil {
 		t.Fatal("Notify succeeded while the sender is down")
 	}
-	if seen[11] {
+	if seen[DedupeKey(ev)] {
 		t.Fatal("event marked as notified although sending failed")
 	}
 	rec.err = nil
@@ -115,5 +115,36 @@ func TestTelegram(t *testing.T) {
 	err := NewTelegram("http://127.0.0.1:1", "123:SECRET", "42", time.Second).Send(context.Background(), "x")
 	if err == nil || strings.Contains(err.Error(), "SECRET") {
 		t.Errorf("transport error = %v, want an error without the token", err)
+	}
+}
+
+// The outbox event_id starts again at 1 after a database reset, so it must
+// not be part of the key: a new order's ticket.issued with a reused id still
+// gets its message, and each refunded payment is announced once.
+func TestDedupeKey(t *testing.T) {
+	a, b := uuid.New(), uuid.New()
+	issuedA := events.OrderEvent{EventID: 3, EventType: events.TicketIssued, OrderID: a}
+	issuedB := events.OrderEvent{EventID: 3, EventType: events.TicketIssued, OrderID: b}
+	if DedupeKey(issuedA) == DedupeKey(issuedB) {
+		t.Error("two orders' ticket.issued share a key because their event_id is equal")
+	}
+	if DedupeKey(issuedA) != DedupeKey(events.OrderEvent{EventID: 99, EventType: events.TicketIssued, OrderID: a}) {
+		t.Error("the key of one order's ticket.issued depends on the event_id")
+	}
+	r1 := events.OrderEvent{EventType: events.OrderRefunded, OrderID: a, ProviderTxnID: "fp_1"}
+	r2 := events.OrderEvent{EventType: events.OrderRefunded, OrderID: a, ProviderTxnID: "fp_2"}
+	if DedupeKey(r1) == DedupeKey(r2) || DedupeKey(r1) == DedupeKey(issuedA) {
+		t.Errorf("keys collide: %q %q %q", DedupeKey(r1), DedupeKey(r2), DedupeKey(issuedA))
+	}
+
+	rec := &recorder{}
+	n := New(rec, memSeen{}, slog.New(slog.DiscardHandler))
+	for _, ev := range []events.OrderEvent{issuedA, issuedB, r1, r2, r1} {
+		if err := n.Notify(context.Background(), ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(rec.sent) != 4 {
+		t.Errorf("sent %d messages, want 4 (the repeated refund is skipped)", len(rec.sent))
 	}
 }
