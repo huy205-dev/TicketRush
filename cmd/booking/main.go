@@ -25,6 +25,7 @@ import (
 	"github.com/huy205-dev/ticketrush/internal/platform/postgres"
 	"github.com/huy205-dev/ticketrush/internal/platform/redisx"
 	"github.com/huy205-dev/ticketrush/internal/queue"
+	"github.com/huy205-dev/ticketrush/web"
 )
 
 const (
@@ -131,5 +132,15 @@ func newRouter(logger *slog.Logger, health *httpx.Health, api *api) http.Handler
 	r.Get("/healthz", health.Live)
 	r.Get("/readyz", health.Ready)
 	api.routes(r)
+
+	// The frontend (web/). Pages are small and change with each build.
+	static := http.FileServerFS(web.Files)
+	serve := func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-cache")
+		static.ServeHTTP(w, r)
+	}
+	r.Get("/", serve)
+	r.Get("/app.js", serve)
+	r.Get("/style.css", serve)
 	return r
 }

@@ -4,9 +4,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"log/slog"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/huy205-dev/ticketrush/internal/httpx"
 	"github.com/huy205-dev/ticketrush/internal/platform/config"
 )
 
@@ -47,5 +51,23 @@ func TestParseIdempotencyKey(t *testing.T) {
 		if ok && key.String() != canonical {
 			t.Errorf("parseIdempotencyKey(%q) = %s, want canonical %s", raw, key, canonical)
 		}
+	}
+}
+
+// Booking serves the frontend (SPEC.md 3.2).
+func TestRouterServesFrontend(t *testing.T) {
+	logger := slog.New(slog.DiscardHandler)
+	h := newRouter(logger, httpx.NewHealth(logger, time.Second), newAPI(apiDeps{logger: logger}))
+	for path, want := range map[string]string{"/": "<title>TicketRush</title>", "/app.js": "EventSource", "/style.css": ".seat"} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
+		if rec.Code != 200 || !strings.Contains(rec.Body.String(), want) {
+			t.Errorf("GET %s = %d, body without %q", path, rec.Code, want)
+		}
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/embed.go", nil))
+	if rec.Code != 404 {
+		t.Errorf("GET /embed.go = %d, want 404", rec.Code)
 	}
 }

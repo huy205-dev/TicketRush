@@ -1,0 +1,27 @@
+:root { --free: #2e9e5b; --held: #e09a2b; --sold: #9aa0a6; --mine: #2f6fde; --text: #1f2328; --muted: #5f6368; }
+* { box-sizing: border-box; }
+body { margin: 0 auto; max-width: 1100px; padding: 16px; font: 15px/1.45 system-ui, sans-serif; color: var(--text); }
+header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 24px; border-bottom: 1px solid #ddd; padding-bottom: 8px; }
+h1 { margin: 0; font-size: 22px; }
+h2 { font-size: 18px; margin: 20px 0 8px; }
+.muted { color: var(--muted); }
+#user-box { margin-left: auto; }
+#message { min-height: 1.4em; font-weight: 600; }
+#message.error { color: #b3261e; }
+button { font: inherit; padding: 6px 14px; cursor: pointer; }
+button:disabled { cursor: not-allowed; }
+.legend { list-style: none; padding: 0; display: flex; gap: 16px; flex-wrap: wrap; }
+.legend li { display: flex; align-items: center; gap: 6px; }
+#seat-map { display: flex; flex-direction: column; gap: 10px; }
+.zone h3 { margin: 4px 0; font-size: 14px; }
+.row { display: flex; align-items: center; gap: 2px; flex-wrap: nowrap; overflow-x: auto; }
+.row-label { width: 22px; flex: none; font-size: 11px; color: var(--muted); }
+.seat { display: inline-block; width: 11px; height: 11px; flex: none; border-radius: 2px; border: 0; padding: 0; background: var(--sold); }
+.seat.AVAILABLE { background: var(--free); cursor: pointer; }
+.seat.HELD { background: var(--held); }
+.seat.SOLD { background: var(--sold); }
+.seat.selected { background: var(--mine); outline: 2px solid #0b3d91; }
+.bar { position: sticky; bottom: 0; background: #fff; border-top: 1px solid #ddd; padding: 8px 0; display: flex; gap: 16px; align-items: center; }
+#tickets { display: flex; flex-wrap: wrap; gap: 16px; }
+.ticket { border: 1px solid #ccc; border-radius: 6px; padding: 8px; text-align: center; }
+.ticket img { width: 180px; height: 180px; image-rendering: pixelated; }

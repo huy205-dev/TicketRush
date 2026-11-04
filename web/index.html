@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TicketRush</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <h1>TicketRush</h1>
+  <p id="event-name" class="muted"></p>
+  <div id="user-box">
+    <form id="login-form">
+      <label>User id <input id="user-id" type="number" min="1" required value="1"></label>
+      <button type="submit">Đăng nhập (dev)</button>
+    </form>
+    <p id="user-info" hidden><span id="user-label"></span> <button id="logout" type="button">Đăng xuất</button></p>
+  </div>
+</header>
+
+<p id="message" role="status" aria-live="polite"></p>
+
+<section id="queue" hidden>
+  <h2>Phòng chờ</h2>
+  <button id="join" type="button">Vào hàng chờ</button>
+  <p id="queue-status" aria-live="polite"></p>
+</section>
+
+<section id="seats" hidden>
+  <h2>Chọn ghế</h2>
+  <p id="admission-status" class="muted" aria-live="polite"></p>
+  <ul class="legend">
+    <li><span class="seat AVAILABLE"></span> Còn trống</li>
+    <li><span class="seat selected"></span> Bạn chọn</li>
+    <li><span class="seat HELD"></span> Đang giữ</li>
+    <li><span class="seat SOLD"></span> Đã bán</li>
+  </ul>
+  <div id="seat-map" aria-label="Sơ đồ ghế"></div>
+  <div class="bar">
+    <span id="selection">Chưa chọn ghế</span>
+    <button id="book" type="button" disabled>Đặt vé</button>
+  </div>
+</section>
+
+<section id="order" hidden>
+  <h2>Đơn của bạn</h2>
+  <p id="order-summary"></p>
+  <p id="order-status"></p>
+  <p id="countdown" aria-live="polite"></p>
+  <p class="actions">
+    <button id="pay" type="button">Thanh toán</button>
+    <button id="cancel" type="button">Huỷ đơn</button>
+  </p>
+  <div id="tickets"></div>
+</section>
+
+<script src="/app.js"></script>
+</body>
+</html>
