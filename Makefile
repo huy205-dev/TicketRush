@@ -10,7 +10,7 @@ LOAD_ENV := set -a && . ./.env && set +a &&
 todo = @echo "make $@: chưa triển khai, dự kiến có ở $(1) (SPEC.md mục 12)." >&2; exit 1
 
 .PHONY: help up down ps logs migrate db-reset seed sqlc load-hold bench-hold bench-relay \
-	run-booking run-waitingroom run-relay run-expiry run-ticket run-refunder run-notifier run-fakepay \
+	run-booking run-waitingroom run-relay run-expiry run-ticket run-refunder run-notifier run-fakepay e2e-browser \
 	test test-integration lint fmt bench invariants chaos-redis k8s-up
 
 help: ## Liệt kê các target
@@ -23,7 +23,7 @@ help: ## Liệt kê các target
 
 ## ---- Hạ tầng -------------------------------------------------------------
 
-up: ## Chạy postgres, redis, redpanda, console và chờ healthy
+up: ## Chạy postgres, redis, redpanda, console, nginx (:8000) và chờ healthy
 	$(COMPOSE) up -d --wait
 
 down: ## Dừng hạ tầng (giữ volume dữ liệu)
@@ -105,6 +105,10 @@ load-hold: ## k6 kịch bản mở bán; cần booking đang chạy và sự ki�
 	TOKENS_FILE=$(CURDIR)/$(LOADTEST_OUT)/tokens.json k6 run --summary-export=$(LOADTEST_OUT)/hold_contention-summary.json \
 		--out csv=$(LOADTEST_OUT)/hold_contention.csv.gz loadtest/hold_contention.js
 	./loadtest/peak_rps.sh $(LOADTEST_OUT)/hold_contention.csv.gz hold
+
+e2e-browser: ## 2 tab trình duyệt, 2 user mua vé đầu–cuối qua nginx (cần mọi service đang chạy)
+	mkdir -p loadtest/out
+	k6 run loadtest/browser_two_buyers.js
 
 BACKEND ?= pg
 RUNS ?= 3
