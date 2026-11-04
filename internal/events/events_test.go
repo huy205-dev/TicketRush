@@ -54,3 +54,39 @@ func TestOrderEventDecodesDatabaseTimestamp(t *testing.T) {
 		t.Errorf("OccurredAt = %v, want %v", ev.OccurredAt, want)
 	}
 }
+
+// Refund events carry the payment being refunded; the fields are left out of
+// every other event (see TestOrderEventWireFormat).
+func TestRefundEventWireFormat(t *testing.T) {
+	ev := OrderEvent{
+		EventID:       7,
+		EventType:     OrderRefundRequested,
+		OccurredAt:    time.Date(2026, 10, 1, 20, 0, 0, 0, time.UTC),
+		OrderID:       uuid.MustParse("0192f7a0-0000-7000-8000-000000000001"),
+		Event:         1,
+		UserID:        123,
+		SeatIDs:       []string{"VIP-A-12"},
+		TotalVND:      3_500_000,
+		ProviderTxnID: "fp_ABC",
+		AmountVND:     3_500_000,
+		Reason:        "PAID_AFTER_CANCEL",
+	}
+	raw, err := json.Marshal(ev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"event_id":7,"event_type":"order.refund_requested","occurred_at":"2026-10-01T20:00:00Z",` +
+		`"order_id":"0192f7a0-0000-7000-8000-000000000001","event":1,"user_id":123,` +
+		`"seat_ids":["VIP-A-12"],"total_vnd":3500000,"provider_txn_id":"fp_ABC","amount_vnd":3500000,` +
+		`"reason":"PAID_AFTER_CANCEL"}`
+	if string(raw) != want {
+		t.Errorf("wire format changed\n got: %s\nwant: %s", raw, want)
+	}
+	var back OrderEvent
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(back, ev) {
+		t.Errorf("round trip mismatch\n got: %+v\nwant: %+v", back, ev)
+	}
+}
