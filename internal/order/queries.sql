@@ -67,6 +67,16 @@ FROM order_seats
 WHERE order_id = ANY(@order_ids::uuid[])
 ORDER BY order_id, seat_id;
 
+-- name: LockOrderStatuses :many
+-- Locks the given orders, in id order so two lockers cannot deadlock, and
+-- returns their current status. The expiry worker releases seats under these
+-- locks so that a late payment cannot re-hold the same seats in between.
+SELECT id, status
+FROM orders
+WHERE id = ANY(@order_ids::uuid[])
+ORDER BY id
+FOR UPDATE;
+
 -- name: LockOrderForPayment :one
 -- Locks the order for the webhook transaction (SPEC.md 9.3) and says, by the
 -- database clock, whether the hold is still running.

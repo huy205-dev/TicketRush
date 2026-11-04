@@ -473,6 +473,42 @@ func (q *Queries) LockOrderForPayment(ctx context.Context, id uuid.UUID) (LockOr
 	return i, err
 }
 
+const lockOrderStatuses = `-- name: LockOrderStatuses :many
+SELECT id, status
+FROM orders
+WHERE id = ANY($1::uuid[])
+ORDER BY id
+FOR UPDATE
+`
+
+type LockOrderStatusesRow struct {
+	ID     uuid.UUID
+	Status string
+}
+
+// Locks the given orders, in id order so two lockers cannot deadlock, and
+// returns their current status. The expiry worker releases seats under these
+// locks so that a late payment cannot re-hold the same seats in between.
+func (q *Queries) LockOrderStatuses(ctx context.Context, orderIds []uuid.UUID) ([]LockOrderStatusesRow, error) {
+	rows, err := q.db.Query(ctx, lockOrderStatuses, orderIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []LockOrderStatusesRow
+	for rows.Next() {
+		var i LockOrderStatusesRow
+		if err := rows.Scan(&i.ID, &i.Status); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const setPaymentOutcome = `-- name: SetPaymentOutcome :exec
 UPDATE payments SET outcome = $1 WHERE provider_txn_id = $2
 `
