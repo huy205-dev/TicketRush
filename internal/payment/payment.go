@@ -45,10 +45,14 @@ func (w Webhook) Validate() error {
 		return fmt.Errorf("%w: provider_txn_id must be 1-128 characters", ErrInvalidWebhook)
 	case w.OrderID == uuid.Nil:
 		return fmt.Errorf("%w: order_id is required", ErrInvalidWebhook)
-	case w.AmountVND < 0:
-		return fmt.Errorf("%w: amount_vnd must not be negative", ErrInvalidWebhook)
 	case w.Status != StatusSucceeded && w.Status != StatusFailed:
 		return fmt.Errorf("%w: status must be SUCCEEDED or FAILED", ErrInvalidWebhook)
+	case w.AmountVND < 0:
+		return fmt.Errorf("%w: amount_vnd must not be negative", ErrInvalidWebhook)
+	case w.Status == StatusSucceeded && w.AmountVND == 0:
+		// Money that moved is never 0 dong; a refund of 0 would be rejected
+		// by the gateway forever.
+		return fmt.Errorf("%w: a SUCCEEDED payment must have a positive amount_vnd", ErrInvalidWebhook)
 	}
 	return nil
 }

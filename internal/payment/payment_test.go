@@ -45,8 +45,15 @@ func TestWebhookValidate(t *testing.T) {
 		"long txn":     func(w *Webhook) { w.ProviderTxnID = strings.Repeat("a", 129) },
 		"no order":     func(w *Webhook) { w.OrderID = uuid.Nil },
 		"negative":     func(w *Webhook) { w.AmountVND = -1 },
+		"zero paid":    func(w *Webhook) { w.AmountVND = 0 },
 		"odd status":   func(w *Webhook) { w.Status = "PENDING" },
 		"empty status": func(w *Webhook) { w.Status = "" },
+	}
+	// A failed payment moved no money, so 0 is fine there.
+	failed := ok
+	failed.Status, failed.AmountVND = StatusFailed, 0
+	if err := failed.Validate(); err != nil {
+		t.Errorf("failed webhook with amount 0: %v", err)
 	}
 	for name, mutate := range bad {
 		w := ok
