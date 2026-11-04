@@ -5,6 +5,7 @@ package order_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"slices"
 	"sync"
@@ -14,10 +15,12 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/huy205-dev/ticketrush/internal/catalog"
 	"github.com/huy205-dev/ticketrush/internal/events"
 	"github.com/huy205-dev/ticketrush/internal/inventory"
 	"github.com/huy205-dev/ticketrush/internal/order"
 	"github.com/huy205-dev/ticketrush/internal/payment"
+	"github.com/huy205-dev/ticketrush/internal/platform/redisx"
 )
 
 // Every branch of the payment webhook (SPEC.md 9.3), on both inventory
@@ -430,4 +433,161 @@ func TestPaymentUnknownOrder(t *testing.T) {
 			t.Errorf("payment recorded for an unknown order: %q", got)
 		}
 	})
+}
+
+// A resent webhook repairs the inventory when the first delivery committed
+// but never reached confirm (its reply was lost or the process died).
+func TestDuplicateWebhookConfirmsAgain(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, e env) {
+		ctx := context.Background()
+		seats := []string{"VIP-A-1", "VIP-A-2"}
+		o := e.create(t, e.svc, 1, seats...)
+		wh := paid(o, 7_000_000)
+		e.apply(t, wh)
+
+		// Undo the confirm, as if the first delivery died right after COMMIT.
+		_, isPG := e.inv.(*inventory.PG)
+		if isPG {
+			_, err := e.pool.Exec(ctx, `INSERT INTO seat_holds (event_id, seat_id, order_id, expires_at)
+				SELECT $1, s, $2, now() + interval '1 minute' FROM unnest($3::text[]) AS s`, e.eventID, o.ID, seats)
+			if err != nil {
+				t.Fatal(err)
+			}
+		} else {
+			for _, s := range seats {
+				if err := e.rdb.Set(ctx, fmt.Sprintf("seat:{%d}:%s", e.eventID, s), "held:"+o.ID.String(), time.Minute).Err(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			e.wantSeats(t, inventory.Held, seats...)
+		}
+
+		if r := e.apply(t, wh); r.Outcome != order.OutcomeDuplicate || r.Status != order.StatusPaid {
+			t.Fatalf("resend = %+v, want DUPLICATE for a PAID order", r)
+		}
+		e.wantSeats(t, inventory.Sold, seats...)
+		if isPG {
+			var n int
+			if err := e.pool.QueryRow(ctx, `SELECT count(*) FROM seat_holds WHERE order_id = $1`, o.ID).Scan(&n); err != nil {
+				t.Fatal(err)
+			}
+			if n != 0 {
+				t.Errorf("%d seat_holds rows left after the resend, want the confirm to drop them", n)
+			}
+		}
+	})
+}
+
+// A late payment whose re-hold succeeds although the seat already has a
+// ticket (the inventory was wrong) is the same double sale the UNIQUE guard
+// stops on the on-time path: refund as SEAT_CONFLICT. The PG inventory sees
+// the ticket itself and refuses the re-hold.
+func TestLatePaymentSeatTicketedBehindInventory(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, e env) {
+		ctx := context.Background()
+		late := e.create(t, shortHoldService(e, 200*time.Millisecond), 1, "VIP-A-1")
+		time.Sleep(300 * time.Millisecond)
+		if _, err := order.NewExpirer(e.pool, e.inv, slog.New(slog.DiscardHandler)).RunOnce(ctx); err != nil {
+			t.Fatal(err)
+		}
+		other := e.create(t, e.svc, 2, "VIP-B-1")
+		_, err := e.pool.Exec(ctx, `INSERT INTO tickets (id, order_id, event_id, seat_id) VALUES ($1, $2, $3, 'VIP-A-1')`,
+			uuid.New(), other.ID, e.eventID)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		want := order.ReasonSeatConflict
+		if _, isPG := e.inv.(*inventory.PG); isPG {
+			want = order.ReasonLatePaymentSeatTaken
+		}
+		wh := paid(late, 3_500_000)
+		r := e.apply(t, wh)
+		if r.Outcome != order.OutcomeRefundRequired || r.Reason != want || r.Status != order.StatusRefunding {
+			t.Fatalf("result = %+v, want REFUND_REQUIRED/%s and REFUNDING", r, want)
+		}
+		e.wantRefund(t, late, wh, want)
+		if n := len(e.ticketSeats(t, late.ID)); n != 0 {
+			t.Errorf("late order got %d tickets", n)
+		}
+	})
+}
+
+// The hold deadline decides between the on-time and the late branch. Here the
+// order is still HELD in PostgreSQL (no expiry run yet) but its inventory hold
+// has run out and another buyer holds the seat: the payment must not ticket
+// it.
+func TestLatePaymentAfterTheHoldRanOut(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, e env) {
+		short := order.NewService(e.pool, catalog.NewService(e.pool, e.inv), e.inv, redisx.NewLocker(e.rdb),
+			order.Config{HoldTTL: 200 * time.Millisecond, HoldGrace: 50 * time.Millisecond}, slog.New(slog.DiscardHandler))
+		late := e.create(t, short, 1, "VIP-A-1")
+		time.Sleep(400 * time.Millisecond)
+		if s := e.orderStatus(t, late.ID); s != order.StatusHeld {
+			t.Fatalf("order is %s before the payment, want HELD", s)
+		}
+		other := e.create(t, e.svc, 2, "VIP-A-1")
+
+		wh := paid(late, 3_500_000)
+		r := e.apply(t, wh)
+		if r.Outcome != order.OutcomeRefundRequired || r.Reason != order.ReasonLatePaymentSeatTaken || r.Status != order.StatusRefunding {
+			t.Fatalf("result = %+v, want REFUND_REQUIRED/LATE_PAYMENT_SEAT_TAKEN and REFUNDING", r)
+		}
+		e.wantRefund(t, late, wh, order.ReasonLatePaymentSeatTaken)
+		if n := len(e.ticketSeats(t, late.ID)); n != 0 {
+			t.Errorf("late order got %d tickets", n)
+		}
+		e.wantSeats(t, inventory.Held, "VIP-A-1")
+		if s := e.orderStatus(t, other.ID); s != order.StatusHeld {
+			t.Errorf("the other buyer's order is %s, want HELD", s)
+		}
+	})
+}
+
+// A wrong amount is refunded whatever the order's status, and only a HELD
+// order gives its seats back (expired and cancelled orders already did).
+func TestAmountMismatchOutsideTheHold(t *testing.T) {
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, e env) *order.Order
+	}{
+		{"expired", func(t *testing.T, e env) *order.Order {
+			o := e.create(t, shortHoldService(e, 200*time.Millisecond), 1, "VIP-A-1")
+			time.Sleep(300 * time.Millisecond)
+			if _, err := order.NewExpirer(e.pool, e.inv, slog.New(slog.DiscardHandler)).RunOnce(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			return o
+		}},
+		{"held past deadline", func(t *testing.T, e env) *order.Order {
+			o := e.create(t, shortHoldService(e, 200*time.Millisecond), 1, "VIP-A-1")
+			time.Sleep(300 * time.Millisecond)
+			e.wantSeats(t, inventory.Held, "VIP-A-1") // HOLD_GRACE keeps the inventory hold
+			return o
+		}},
+		{"cancelled", func(t *testing.T, e env) *order.Order {
+			o := e.create(t, e.svc, 1, "VIP-A-1")
+			if _, err := e.svc.Cancel(context.Background(), 1, o.ID); err != nil {
+				t.Fatal(err)
+			}
+			return o
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			forEachBackend(t, func(t *testing.T, e env) {
+				o := tc.setup(t, e)
+				wh := paid(o, 1_000)
+				r := e.apply(t, wh)
+				if r.Outcome != order.OutcomeRefundRequired || r.Reason != order.ReasonAmountMismatch || r.Status != order.StatusRefunding {
+					t.Fatalf("result = %+v, want REFUND_REQUIRED/AMOUNT_MISMATCH and REFUNDING", r)
+				}
+				e.wantRefund(t, o, wh, order.ReasonAmountMismatch)
+				e.wantSeats(t, inventory.Available, "VIP-A-1")
+				if n := len(e.ticketSeats(t, o.ID)); n != 0 {
+					t.Errorf("%d tickets issued for a wrong amount", n)
+				}
+			})
+		})
+	}
 }

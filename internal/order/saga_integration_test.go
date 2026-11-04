@@ -210,3 +210,94 @@ func TestRefundDoublePaymentKeepsOrder(t *testing.T) {
 		}
 	})
 }
+
+// A second payment while the order is being refunded, and one after it was
+// refunded, is a double payment: refunded on its own, never moving the
+// order. Only the refund of the original reason finishes the compensation.
+func TestDoublePaymentWhileRefunding(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, e env) {
+		ctx := context.Background()
+		gw := &fakeGateway{}
+		rp := order.NewRefundProcessor(e.pool, gw, slog.New(slog.DiscardHandler))
+		o := e.create(t, e.svc, 1, "VIP-A-1")
+
+		wrong := paid(o, 100)
+		if r := e.apply(t, wrong); r.Reason != order.ReasonAmountMismatch || r.Status != order.StatusRefunding {
+			t.Fatalf("wrong amount = %+v", r)
+		}
+		second := paid(o, 3_500_000)
+		if r := e.apply(t, second); r.Reason != order.ReasonDoublePayment || r.Status != order.StatusRefunding {
+			t.Fatalf("payment while REFUNDING = %+v, want DOUBLE_PAYMENT with the order still REFUNDING", r)
+		}
+
+		if err := rp.Process(ctx, second.ProviderTxnID); err != nil {
+			t.Fatal(err)
+		}
+		if s := e.orderStatus(t, o.ID); s != order.StatusRefunding {
+			t.Errorf("after the double payment's refund the order is %s, want REFUNDING", s)
+		}
+		if err := rp.Process(ctx, wrong.ProviderTxnID); err != nil {
+			t.Fatal(err)
+		}
+		if s := e.orderStatus(t, o.ID); s != order.StatusRefunded {
+			t.Errorf("after the wrong amount's refund the order is %s, want REFUNDED", s)
+		}
+
+		third := paid(o, 3_500_000)
+		if r := e.apply(t, third); r.Reason != order.ReasonDoublePayment || r.Status != order.StatusRefunded {
+			t.Fatalf("payment after REFUNDED = %+v, want DOUBLE_PAYMENT with the order still REFUNDED", r)
+		}
+		if err := rp.Process(ctx, third.ProviderTxnID); err != nil {
+			t.Fatal(err)
+		}
+		if s := e.orderStatus(t, o.ID); s != order.StatusRefunded {
+			t.Errorf("order is %s, want REFUNDED", s)
+		}
+		for txn, r := range e.refunds(t) {
+			if r.Status != order.RefundSucceeded {
+				t.Errorf("refund %s is %s, want SUCCEEDED", txn, r.Status)
+			}
+		}
+		if len(gw.calls) != 3 {
+			t.Errorf("gateway refunded %d times, want 3", len(gw.calls))
+		}
+	})
+}
+
+// Two deliveries of one order.refund_requested at once (a rebalance) finish
+// the refund once.
+func TestRefundConcurrently(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, e env) {
+		ctx := context.Background()
+		rp := order.NewRefundProcessor(e.pool, &fakeGateway{}, slog.New(slog.DiscardHandler))
+		o := e.create(t, e.svc, 1, "VIP-A-1")
+		if _, err := e.svc.Cancel(ctx, 1, o.ID); err != nil {
+			t.Fatal(err)
+		}
+		wh := paid(o, 3_500_000)
+		e.apply(t, wh)
+
+		var wg sync.WaitGroup
+		for range 4 {
+			wg.Go(func() {
+				if err := rp.Process(ctx, wh.ProviderTxnID); err != nil {
+					t.Error(err)
+				}
+			})
+		}
+		wg.Wait()
+
+		n := 0
+		for _, m := range e.outbox(t, o.ID) {
+			if m.EventType == events.OrderRefunded {
+				n++
+			}
+		}
+		if n != 1 {
+			t.Errorf("%d order.refunded events, want 1", n)
+		}
+		if s := e.orderStatus(t, o.ID); s != order.StatusRefunded {
+			t.Errorf("order is %s, want REFUNDED", s)
+		}
+	})
+}
