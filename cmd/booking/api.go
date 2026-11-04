@@ -56,6 +56,9 @@ type apiDeps struct {
 	webhookSecret string
 	callbackURL   string
 	devLogin      bool
+	// admissions verifies X-Admission-Token on POST /v1/orders; nil means
+	// REQUIRE_ADMISSION=false and orders need no admission.
+	admissions *auth.AdmissionTokens
 }
 
 // api holds the booking HTTP handlers.
@@ -83,7 +86,11 @@ func (a *api) routes(r chi.Router) {
 
 		r.Group(func(r chi.Router) {
 			r.Use(httpx.RequireUser(a.tokens, a.logger))
-			r.Post("/orders", a.handleCreateOrder)
+			if a.admissions != nil {
+				r.With(httpx.RequireAdmission(a.admissions, a.logger)).Post("/orders", a.handleCreateOrder)
+			} else {
+				r.Post("/orders", a.handleCreateOrder)
+			}
 			r.Get("/orders/{orderID}", a.handleGetOrder)
 			r.Post("/orders/{orderID}/cancel", a.handleCancelOrder)
 			r.Get("/orders/{orderID}/tickets", a.handleTickets)
@@ -284,7 +291,15 @@ func (a *api) handleCreateOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	o, created, err := a.orders.Create(r.Context(), userID, key, req)
+	var (
+		o       *order.Order
+		created bool
+	)
+	if adm, ok := auth.AdmissionFrom(r.Context()); ok {
+		o, created, err = a.orders.CreateAdmitted(r.Context(), userID, key, req, adm)
+	} else {
+		o, created, err = a.orders.Create(r.Context(), userID, key, req)
+	}
 	if err != nil {
 		httpx.WriteErr(w, r, a.logger, err)
 		return

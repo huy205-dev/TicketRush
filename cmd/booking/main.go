@@ -4,7 +4,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -22,10 +21,10 @@ import (
 	"github.com/huy205-dev/ticketrush/internal/order"
 	"github.com/huy205-dev/ticketrush/internal/payment"
 	"github.com/huy205-dev/ticketrush/internal/platform/app"
-	"github.com/huy205-dev/ticketrush/internal/platform/config"
 	"github.com/huy205-dev/ticketrush/internal/platform/httpserver"
 	"github.com/huy205-dev/ticketrush/internal/platform/postgres"
 	"github.com/huy205-dev/ticketrush/internal/platform/redisx"
+	"github.com/huy205-dev/ticketrush/internal/queue"
 )
 
 const (
@@ -48,10 +47,6 @@ func main() {
 func run(ctx context.Context, lookupEnv func(string) (string, bool), stdout io.Writer) error {
 	cfg, logger, err := app.Setup(serviceName, lookupEnv, stdout)
 	if err != nil {
-		return err
-	}
-	if err := checkSupported(cfg); err != nil {
-		logger.Error("unsupported configuration", "err", err)
 		return err
 	}
 
@@ -77,8 +72,15 @@ func run(ctx context.Context, lookupEnv func(string) (string, bool), stdout io.W
 		return err
 	}
 	cat := catalog.NewService(pool, inv)
-	orders := order.NewService(pool, cat, inv, redisx.NewLocker(rdb),
-		order.Config{HoldTTL: cfg.HoldTTL, HoldGrace: cfg.HoldGrace}, logger)
+	// With REQUIRE_ADMISSION=true (the default) every order needs a waiting
+	// room admission, used once; false lets load tests reach booking directly.
+	orderCfg := order.Config{HoldTTL: cfg.HoldTTL, HoldGrace: cfg.HoldGrace}
+	var admissions *auth.AdmissionTokens
+	if cfg.RequireAdmission {
+		admissions = auth.NewAdmissionTokens(cfg.AdmissionSecret, cfg.AdmissionTTL)
+		orderCfg.Admissions = queue.NewLedger(rdb, cfg.AdmissionTTL)
+	}
+	orders := order.NewService(pool, cat, inv, redisx.NewLocker(rdb), orderCfg, logger)
 	tokens := auth.NewTokens(cfg.JWTSecret, auth.AccessTokenTTL)
 	api := newAPI(apiDeps{
 		logger:        logger,
@@ -90,6 +92,7 @@ func run(ctx context.Context, lookupEnv func(string) (string, bool), stdout io.W
 		webhookSecret: cfg.WebhookSecret,
 		callbackURL:   cfg.PublicBaseURL + "/v1/webhooks/fakepay",
 		devLogin:      cfg.IsDev(),
+		admissions:    admissions,
 	})
 
 	srv := &http.Server{
@@ -112,15 +115,6 @@ func run(ctx context.Context, lookupEnv func(string) (string, bool), stdout io.W
 		return err
 	}
 	logger.Info("booking stopped")
-	return nil
-}
-
-// checkSupported rejects settings whose implementation belongs to a later
-// milestone, rather than silently running without them.
-func checkSupported(cfg *config.Config) error {
-	if cfg.RequireAdmission {
-		return errors.New("REQUIRE_ADMISSION=true needs the waiting room (M5); set REQUIRE_ADMISSION=false")
-	}
 	return nil
 }
 

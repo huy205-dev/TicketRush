@@ -28,6 +28,7 @@ import (
 	"github.com/huy205-dev/ticketrush/internal/payment"
 	"github.com/huy205-dev/ticketrush/internal/platform/redisx"
 	"github.com/huy205-dev/ticketrush/internal/platform/testenv"
+	"github.com/huy205-dev/ticketrush/internal/queue"
 )
 
 const testWebhookSecret = "wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww"
@@ -84,21 +85,29 @@ func decode[T any](t *testing.T, r response) T {
 // inventory backend ("pg" or "redis").
 func startServer(t *testing.T, backend string) (*client, int64) {
 	t.Helper()
-	s := startFull(t, backend, nil)
+	s := startFull(t, backend, serverOpts{})
 	return s.client, s.eventID
 }
 
 // server is a running booking API, optionally with fakepay beside it.
 type server struct {
 	*client
-	eventID int64
-	pool    *pgxpool.Pool
-	fakepay *fakepay.Server // nil unless started with a fakepay config
+	eventID    int64
+	pool       *pgxpool.Pool
+	fakepay    *fakepay.Server       // nil unless started with a fakepay config
+	admissions *auth.AdmissionTokens // nil unless admission is required
 }
 
-// startFull starts booking and, if fp is not nil, a fakepay configured with
-// fp that booking registers payments with and that posts webhooks back.
-func startFull(t *testing.T, backend string, fp *fakepay.Config) server {
+type serverOpts struct {
+	// fakepay, if set, starts a fakepay with this config that booking
+	// registers payments with and that posts webhooks back.
+	fakepay *fakepay.Config
+	// requireAdmission runs booking as with REQUIRE_ADMISSION=true.
+	requireAdmission bool
+}
+
+// startFull starts booking with the given options.
+func startFull(t *testing.T, backend string, opts serverOpts) server {
 	t.Helper()
 	pool := containers.DB.New(t, 20)
 	rdb := containers.Redis.New(t)
@@ -112,18 +121,23 @@ func startFull(t *testing.T, backend string, fp *fakepay.Config) server {
 		t.Fatal(err)
 	}
 	cat := catalog.NewService(pool, inv)
-	orders := order.NewService(pool, cat, inv, redisx.NewLocker(rdb),
-		order.Config{HoldTTL: 10 * time.Minute, HoldGrace: 30 * time.Second}, logger)
+	orderCfg := order.Config{HoldTTL: 10 * time.Minute, HoldGrace: 30 * time.Second}
+	s := server{eventID: eventID, pool: pool}
+	if opts.requireAdmission {
+		s.admissions = auth.NewAdmissionTokens(strings.Repeat("a", 32), 5*time.Minute)
+		orderCfg.Admissions = queue.NewLedger(rdb, 5*time.Minute)
+	}
+	orders := order.NewService(pool, cat, inv, redisx.NewLocker(rdb), orderCfg, logger)
 	deps := apiDeps{
 		logger: logger, db: pool, tokens: auth.NewTokens(strings.Repeat("k", 32), time.Hour),
 		catalog: cat, orders: orders, webhookSecret: testWebhookSecret, devLogin: true,
+		admissions: s.admissions,
 	}
 
 	bookingSrv := httptest.NewUnstartedServer(nil)
-	s := server{eventID: eventID, pool: pool}
-	if fp != nil {
+	if opts.fakepay != nil {
 		fpSrv := httptest.NewUnstartedServer(nil)
-		cfg := *fp
+		cfg := *opts.fakepay
 		cfg.WebhookSecret = testWebhookSecret
 		cfg.PublicURL = "http://" + fpSrv.Listener.Addr().String()
 		ctx, cancel := context.WithCancel(context.Background())

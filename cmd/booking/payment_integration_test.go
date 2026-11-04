@@ -52,7 +52,7 @@ func TestWebhookOverHTTP(t *testing.T) {
 }
 
 func testWebhookOverHTTP(t *testing.T, backend string) {
-	s := startFull(t, backend, nil)
+	s := startFull(t, backend, serverOpts{})
 	s.login(5)
 	o := s.createOrder(s.eventID, "VIP-A-1")
 	wh, _ := json.Marshal(payment.Webhook{
@@ -115,9 +115,9 @@ func (s server) orderStatus(t *testing.T, id uuid.UUID) order.Status {
 func TestPayThroughFakepay(t *testing.T) {
 	for _, backend := range []string{"pg", "redis"} {
 		t.Run(backend, func(t *testing.T) {
-			s := startFull(t, backend, &fakepay.Config{
+			s := startFull(t, backend, serverOpts{fakepay: &fakepay.Config{
 				DelayMax: 20 * time.Millisecond, DuplicateRate: 1, FailRate: 0.5, RetryBase: 10 * time.Millisecond,
-			})
+			}})
 			s.login(8)
 			o := s.createOrder(s.eventID, "VIP-A-1", "VIP-A-2")
 			if !strings.HasSuffix(o.PaymentURL, "/pay/"+o.OrderID.String()) {

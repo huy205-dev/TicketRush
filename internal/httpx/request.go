@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/huy205-dev/ticketrush/internal/auth"
+	"github.com/huy205-dev/ticketrush/internal/order"
 	"github.com/huy205-dev/ticketrush/internal/platform/logging"
 )
 
@@ -49,6 +50,37 @@ func RequireUser(tokens *auth.Tokens, logger *slog.Logger) func(http.Handler) ht
 			}
 			ctx := auth.WithUserID(r.Context(), userID)
 			ctx = logging.With(ctx, slog.Int64("user_id", userID))
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
+}
+
+// AdmissionHeader carries the waiting room's admission token (SPEC.md 7.1).
+const AdmissionHeader = "X-Admission-Token"
+
+// RequireAdmission rejects requests without a valid admission token issued
+// to the authenticated user, with 403 ADMISSION_REQUIRED, and puts the
+// admission in the context. The event and the single use are checked by
+// the order service. It must run after RequireUser.
+func RequireAdmission(tokens *auth.AdmissionTokens, logger *slog.Logger) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			raw := r.Header.Get(AdmissionHeader)
+			if raw == "" {
+				WriteErr(w, r, logger, fmt.Errorf("%w: missing %s", order.ErrAdmissionRequired, AdmissionHeader))
+				return
+			}
+			adm, err := tokens.Verify(raw)
+			if err != nil {
+				WriteErr(w, r, logger, fmt.Errorf("%w: %w", order.ErrAdmissionRequired, err))
+				return
+			}
+			if userID, _ := auth.UserIDFrom(r.Context()); adm.UserID != userID {
+				WriteErr(w, r, logger, fmt.Errorf("%w: token belongs to user %d", order.ErrAdmissionRequired, adm.UserID))
+				return
+			}
+			ctx := auth.WithAdmission(r.Context(), adm)
+			ctx = logging.With(ctx, slog.String("queue_id", adm.QueueID.String()))
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
