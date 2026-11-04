@@ -46,7 +46,13 @@ func (c *client) signedWebhook(body []byte, sig string) response {
 // and recorded (duplicates and unknown orders included), 400 for a signed
 // body that makes no sense.
 func TestWebhookOverHTTP(t *testing.T) {
-	s := startFull(t, "redis", nil)
+	for _, backend := range []string{"pg", "redis"} {
+		t.Run(backend, func(t *testing.T) { testWebhookOverHTTP(t, backend) })
+	}
+}
+
+func testWebhookOverHTTP(t *testing.T, backend string) {
+	s := startFull(t, backend, nil)
 	s.login(5)
 	o := s.createOrder(s.eventID, "VIP-A-1")
 	wh, _ := json.Marshal(payment.Webhook{
