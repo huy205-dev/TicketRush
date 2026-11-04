@@ -210,14 +210,26 @@ func TestDuplicatesAndRetries(t *testing.T) {
 		}
 	})
 
-	t.Run("5xx rate 1 resends until the attempts run out", func(t *testing.T) {
+	t.Run("5xx rate 1 resends until the resends run out", func(t *testing.T) {
 		b := newBooking(t)
-		g := newGateway(t, Config{FailRate: 1, MaxAttempts: 4})
+		g := newGateway(t, Config{FailRate: 1, MaxResends: 3})
 		id, _ := g.create(t, b, 1)
 		g.complete(t, id, payment.StatusSucceeded)
 		g.s.wg.Wait()
 		if n := len(b.webhooks()); n != 4 {
-			t.Errorf("attempts = %d, want 4", n)
+			t.Errorf("posts = %d, want 4 (the first and 3 resends)", n)
+		}
+	})
+
+	// SPEC.md 7.3: resend with backoff 1s, 2s, 4s... at most 8 times.
+	t.Run("default is 8 resends after the first post", func(t *testing.T) {
+		b := newBooking(t)
+		g := newGateway(t, Config{FailRate: 1})
+		id, _ := g.create(t, b, 1)
+		g.complete(t, id, payment.StatusSucceeded)
+		g.s.wg.Wait()
+		if n := len(b.webhooks()); n != 9 {
+			t.Errorf("posts = %d, want 9", n)
 		}
 	})
 
@@ -281,5 +293,84 @@ func TestValidation(t *testing.T) {
 	res, _ := http.Get(g.srv.URL + "/pay/" + uuid.NewString())
 	if res.StatusCode != 404 {
 		t.Errorf("page for unknown order = %d, want 404", res.StatusCode)
+	}
+}
+
+func TestCallbacksAreRestrictedToBooking(t *testing.T) {
+	b := newBooking(t)
+	g := newGateway(t, Config{CallbackPrefix: b.srv.URL})
+	for _, cb := range []string{"http://attacker.example/hook", b.srv.URL + ".attacker.example/hook"} {
+		status, body := g.post(t, "/v1/payments", payment.CreatePaymentRequest{OrderID: uuid.New(), AmountVND: 1, CallbackURL: cb})
+		if status != 400 {
+			t.Errorf("callback %s: %d %s, want 400", cb, status, body)
+		}
+		status, _ = g.post(t, "/v1/payments/auto", map[string]any{"order_id": uuid.New(), "amount_vnd": 1, "callback_url": cb})
+		if status != 400 {
+			t.Errorf("auto with callback %s: %d, want 400", cb, status)
+		}
+	}
+	if status, body := g.post(t, "/v1/payments", payment.CreatePaymentRequest{OrderID: uuid.New(), AmountVND: 1, CallbackURL: b.srv.URL + "/v1/webhooks/fakepay"}); status != 200 {
+		t.Errorf("booking's own callback: %d %s, want 200", status, body)
+	}
+}
+
+// A redirect would re-send the signed body to another host: fakepay treats
+// it as a failed delivery instead of following it.
+func TestWebhooksDoNotFollowRedirects(t *testing.T) {
+	var elsewhere atomic.Int64
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { elsewhere.Add(1) }))
+	defer other.Close()
+	var posts atomic.Int64
+	redirecting := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		posts.Add(1)
+		http.Redirect(w, r, other.URL, http.StatusTemporaryRedirect)
+	}))
+	defer redirecting.Close()
+
+	g := newGateway(t, Config{MaxResends: 1})
+	id := uuid.New()
+	if status, _ := g.post(t, "/v1/payments", payment.CreatePaymentRequest{OrderID: id, AmountVND: 1, CallbackURL: redirecting.URL}); status != 200 {
+		t.Fatal(status)
+	}
+	g.complete(t, id, payment.StatusSucceeded)
+	g.s.wg.Wait()
+	if posts.Load() != 2 || elsewhere.Load() != 0 {
+		t.Errorf("posts to the callback = %d (want 2), requests to the redirect target = %d (want 0)", posts.Load(), elsewhere.Load())
+	}
+}
+
+// Auto mode for an order registered before completes the stored payment,
+// not whatever amount the request names.
+func TestAutoKeepsTheFirstRegistration(t *testing.T) {
+	b := newBooking(t)
+	g := newGateway(t, Config{})
+	id, _ := g.create(t, b, 100)
+	if status, _ := g.post(t, "/v1/payments/auto", map[string]any{"order_id": id, "amount_vnd": 999, "callback_url": b.srv.URL}); status != 200 {
+		t.Fatal(status)
+	}
+	g.s.wg.Wait()
+	if got := b.webhooks(); len(got) != 1 || got[0].AmountVND != 100 {
+		t.Errorf("webhooks = %+v, want one for the registered 100", got)
+	}
+}
+
+func TestShutdownCancelsPendingDeliveries(t *testing.T) {
+	b := newBooking(t)
+	cfg := Config{WebhookSecret: secret, DelayMin: time.Hour, DelayMax: time.Hour}
+	ctx, cancel := context.WithCancel(context.Background())
+	s := New(ctx, cfg, slog.New(slog.DiscardHandler))
+	if _, err := s.complete(s.register(payment.CreatePaymentRequest{OrderID: uuid.New(), AmountVND: 1, CallbackURL: b.srv.URL}), payment.StatusSucceeded); err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	done := make(chan struct{})
+	go func() { s.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Wait did not return after the context was cancelled")
+	}
+	if n := len(b.webhooks()); n != 0 {
+		t.Errorf("%d webhooks sent after shutdown", n)
 	}
 }

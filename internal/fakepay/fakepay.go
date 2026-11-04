@@ -10,12 +10,14 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"log/slog"
 	mrand "math/rand/v2"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -37,19 +39,31 @@ type Config struct {
 	LateRate      float64
 	LateExtra     time.Duration
 	FailRate      float64
-	// MaxAttempts and RetryBase shape redelivery: RetryBase, 2x, 4x...
-	// (SPEC.md: 1s, 2s, 4s... at most 8 attempts).
-	MaxAttempts int
-	RetryBase   time.Duration
+	// MaxResends and RetryBase shape redelivery after the first post:
+	// waits of RetryBase, 2x, 4x... for at most MaxResends resends (SPEC.md
+	// 7.3: 1s, 2s, 4s... at most 8 times).
+	MaxResends int
+	RetryBase  time.Duration
+	// CallbackPrefix is booking's base URL: callback URLs outside it are
+	// refused, so fakepay cannot be made to post signed requests anywhere
+	// else. Empty allows any URL (tests).
+	CallbackPrefix string
 }
+
+// ErrInvalidRequest is wrapped by every validation error; handlers answer
+// 400.
+var ErrInvalidRequest = errors.New("invalid request")
 
 // Server is the fake gateway.
 type Server struct {
 	cfg    Config
 	logger *slog.Logger
 	client *http.Client
-	ctx    context.Context // deliveries stop when it is cancelled
-	wg     sync.WaitGroup
+	// ctx is the lifetime of background deliveries, which outlive the HTTP
+	// request that scheduled them. It is passed explicitly to every function
+	// doing I/O; cancelling it stops all deliveries.
+	ctx context.Context
+	wg  sync.WaitGroup
 
 	mu       sync.Mutex
 	rnd      *mrand.Rand
@@ -60,16 +74,20 @@ type Server struct {
 
 // New returns a gateway whose webhook deliveries run until ctx is cancelled.
 func New(ctx context.Context, cfg Config, logger *slog.Logger) *Server {
-	if cfg.MaxAttempts <= 0 {
-		cfg.MaxAttempts = 8
+	if cfg.MaxResends <= 0 {
+		cfg.MaxResends = 8
 	}
 	if cfg.RetryBase <= 0 {
 		cfg.RetryBase = time.Second
 	}
 	return &Server{
-		cfg:      cfg,
-		logger:   logger,
-		client:   &http.Client{Timeout: 10 * time.Second},
+		cfg:    cfg,
+		logger: logger,
+		client: &http.Client{
+			Timeout: 10 * time.Second,
+			// A redirect would re-send the signed body somewhere else.
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		},
 		ctx:      ctx,
 		rnd:      mrand.New(mrand.NewPCG(uint64(time.Now().UnixNano()), 0x7469636b6574)),
 		payments: make(map[uuid.UUID]payment.CreatePaymentRequest),
@@ -93,28 +111,36 @@ func (s *Server) Routes(r chi.Router) {
 
 // ---- payments ------------------------------------------------------------
 
-func validCreate(req payment.CreatePaymentRequest) error {
+func (s *Server) validCreate(req payment.CreatePaymentRequest) error {
 	u, err := url.Parse(req.CallbackURL)
+	prefix := s.cfg.CallbackPrefix
 	switch {
 	case req.OrderID == uuid.Nil:
-		return fmt.Errorf("order_id is required")
+		return fmt.Errorf("%w: order_id is required", ErrInvalidRequest)
 	case req.AmountVND <= 0:
-		return fmt.Errorf("amount_vnd must be positive")
+		return fmt.Errorf("%w: amount_vnd must be positive", ErrInvalidRequest)
 	case err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "":
-		return fmt.Errorf("callback_url must be an absolute http(s) URL")
+		return fmt.Errorf("%w: callback_url must be an absolute http(s) URL", ErrInvalidRequest)
+	case prefix != "" && req.CallbackURL != prefix && !strings.HasPrefix(req.CallbackURL, prefix+"/"):
+		return fmt.Errorf("%w: callback_url must be under %s", ErrInvalidRequest, prefix)
 	}
 	return nil
 }
 
-// register stores the payment; registering an order again keeps the first
-// registration, so the call is idempotent.
-func (s *Server) register(req payment.CreatePaymentRequest) string {
+// register stores the payment and returns the registration in force:
+// registering an order again keeps the first one, so the call is idempotent.
+func (s *Server) register(req payment.CreatePaymentRequest) payment.CreatePaymentRequest {
 	s.mu.Lock()
-	if _, ok := s.payments[req.OrderID]; !ok {
-		s.payments[req.OrderID] = req
+	defer s.mu.Unlock()
+	if p, ok := s.payments[req.OrderID]; ok {
+		return p
 	}
-	s.mu.Unlock()
-	return s.cfg.PublicURL + "/pay/" + req.OrderID.String()
+	s.payments[req.OrderID] = req
+	return req
+}
+
+func (s *Server) paymentURL(orderID uuid.UUID) string {
+	return s.cfg.PublicURL + "/pay/" + orderID.String()
 }
 
 func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
@@ -122,11 +148,12 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	if !s.decode(w, r, &req) {
 		return
 	}
-	if err := validCreate(req); err != nil {
+	if err := s.validCreate(req); err != nil {
 		badRequest(w, err)
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, payment.CreatePaymentResponse{PaymentURL: s.register(req)})
+	p := s.register(req)
+	httpx.WriteJSON(w, http.StatusOK, payment.CreatePaymentResponse{PaymentURL: s.paymentURL(p.OrderID)})
 }
 
 type completeRequest struct {
@@ -178,12 +205,13 @@ func (s *Server) handleAuto(w http.ResponseWriter, r *http.Request) {
 	if req.Result == "" {
 		req.Result = payment.StatusSucceeded
 	}
-	if err := validCreate(req.CreatePaymentRequest); err != nil {
+	if err := s.validCreate(req.CreatePaymentRequest); err != nil {
 		badRequest(w, err)
 		return
 	}
-	s.register(req.CreatePaymentRequest)
-	txn, err := s.complete(req.CreatePaymentRequest, req.Result)
+	// An order registered before keeps its amount and callback.
+	p := s.register(req.CreatePaymentRequest)
+	txn, err := s.complete(p, req.Result)
 	if err != nil {
 		badRequest(w, err)
 		return
@@ -195,7 +223,7 @@ func (s *Server) handleAuto(w http.ResponseWriter, r *http.Request) {
 // call is a separate transaction, so paying twice means two payments.
 func (s *Server) complete(p payment.CreatePaymentRequest, result string) (string, error) {
 	if result != payment.StatusSucceeded && result != payment.StatusFailed {
-		return "", fmt.Errorf("result must be SUCCEEDED or FAILED")
+		return "", fmt.Errorf("%w: result must be SUCCEEDED or FAILED", ErrInvalidRequest)
 	}
 	txn := "fp_" + rand.Text()
 	s.mu.Lock()
@@ -208,7 +236,7 @@ func (s *Server) complete(p payment.CreatePaymentRequest, result string) (string
 	if err != nil {
 		return "", err
 	}
-	s.wg.Go(func() { s.deliver(txn, p.CallbackURL, body) })
+	s.wg.Go(func() { s.deliver(s.ctx, p, txn, body) })
 	return txn, nil
 }
 
@@ -216,7 +244,7 @@ func (s *Server) complete(p payment.CreatePaymentRequest, result string) (string
 
 // deliver waits the configured delay, then sends the webhook, plus 1-3
 // duplicates with probability DuplicateRate, all at once.
-func (s *Server) deliver(txn, callback string, body []byte) {
+func (s *Server) deliver(ctx context.Context, p payment.CreatePaymentRequest, txn string, body []byte) {
 	s.mu.Lock()
 	delay := s.cfg.DelayMin
 	if span := s.cfg.DelayMax - s.cfg.DelayMin; span > 0 {
@@ -232,47 +260,53 @@ func (s *Server) deliver(txn, callback string, body []byte) {
 	}
 	s.mu.Unlock()
 
-	logger := s.logger.With("provider_txn_id", txn)
+	logger := s.logger.With("order_id", p.OrderID.String(), "provider_txn_id", txn)
 	logger.Info("webhook scheduled", "delay_ms", delay.Milliseconds(), "late", late, "copies", copies)
-	if !s.sleep(delay) {
+	if !s.sleep(ctx, delay) {
+		logger.Warn("webhook delivery cancelled by shutdown", "posts", 0)
 		return
 	}
 	sig := payment.Sign(s.cfg.WebhookSecret, body)
 	var wg sync.WaitGroup
 	for i := range copies {
-		wg.Go(func() { s.sendWithRetry(logger.With("copy", i+1), callback, body, sig) })
+		wg.Go(func() { s.sendWithRetry(ctx, logger.With("copy", i+1), p.CallbackURL, body, sig) })
 	}
 	wg.Wait()
 }
 
 // sendWithRetry posts the webhook until booking answers 200 and fakepay does
-// not decide to count it as a failure anyway, backing off exponentially.
-func (s *Server) sendWithRetry(logger *slog.Logger, callback string, body []byte, sig string) {
+// not decide to count it as a failure anyway, then resends with exponential
+// backoff, at most MaxResends times.
+func (s *Server) sendWithRetry(ctx context.Context, logger *slog.Logger, callback string, body []byte, sig string) {
 	wait := s.cfg.RetryBase
-	for attempt := 1; attempt <= s.cfg.MaxAttempts; attempt++ {
-		status, err := s.post(callback, body, sig)
+	for posts := 1; ; posts++ {
+		status, err := s.post(ctx, callback, body, sig)
 		s.mu.Lock()
 		forcedFailure := err == nil && status == http.StatusOK && s.rnd.Float64() < s.cfg.FailRate
 		s.mu.Unlock()
 		switch {
 		case err == nil && status == http.StatusOK && !forcedFailure:
-			logger.Info("webhook delivered", "attempt", attempt)
+			logger.Info("webhook delivered", "posts", posts)
 			return
 		case forcedFailure:
-			logger.Info("webhook accepted but counted as failed on purpose", "attempt", attempt)
+			logger.Info("webhook accepted but counted as failed on purpose", "posts", posts)
 		default:
-			logger.Warn("webhook delivery failed", "attempt", attempt, "status", status, "err", err)
+			logger.Warn("webhook delivery failed", "posts", posts, "status", status, "err", err)
 		}
-		if attempt == s.cfg.MaxAttempts || !s.sleep(wait) {
-			break
+		if posts > s.cfg.MaxResends {
+			logger.Error("webhook given up", "posts", posts)
+			return
+		}
+		if !s.sleep(ctx, wait) {
+			logger.Warn("webhook delivery cancelled by shutdown", "posts", posts)
+			return
 		}
 		wait *= 2
 	}
-	logger.Error("webhook given up", "attempts", s.cfg.MaxAttempts)
 }
 
-func (s *Server) post(callback string, body []byte, sig string) (int, error) {
-	req, err := http.NewRequestWithContext(s.ctx, http.MethodPost, callback, bytes.NewReader(body))
+func (s *Server) post(ctx context.Context, callback string, body []byte, sig string) (int, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, callback, bytes.NewReader(body))
 	if err != nil {
 		return 0, err
 	}
@@ -286,16 +320,16 @@ func (s *Server) post(callback string, body []byte, sig string) (int, error) {
 	return res.StatusCode, nil
 }
 
-// sleep waits d unless the gateway is shutting down; it reports whether the
-// full wait elapsed.
-func (s *Server) sleep(d time.Duration) bool {
+// sleep waits d unless ctx ends first; it reports whether the full wait
+// elapsed.
+func (s *Server) sleep(ctx context.Context, d time.Duration) bool {
 	if d <= 0 {
-		return s.ctx.Err() == nil
+		return ctx.Err() == nil
 	}
 	t := time.NewTimer(d)
 	defer t.Stop()
 	select {
-	case <-s.ctx.Done():
+	case <-ctx.Done():
 		return false
 	case <-t.C:
 		return true
@@ -311,7 +345,7 @@ func (s *Server) handleRefund(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.ProviderTxnID == "" || req.OrderID == uuid.Nil || req.AmountVND <= 0 {
-		badRequest(w, fmt.Errorf("order_id, provider_txn_id and a positive amount_vnd are required"))
+		badRequest(w, fmt.Errorf("%w: order_id, provider_txn_id and a positive amount_vnd are required", ErrInvalidRequest))
 		return
 	}
 	s.mu.Lock()
@@ -324,9 +358,11 @@ func (s *Server) handleRefund(w http.ResponseWriter, r *http.Request) {
 	if !known {
 		// State is in memory; after a restart fakepay no longer knows the
 		// transaction but still honours the refund.
-		s.logger.Warn("refund for a transaction this process did not create", "provider_txn_id", req.ProviderTxnID)
+		s.logger.Warn("refund for a transaction this process did not create",
+			"order_id", req.OrderID.String(), "provider_txn_id", req.ProviderTxnID)
 	}
-	s.logger.Info("refund", "provider_txn_id", req.ProviderTxnID, "amount_vnd", req.AmountVND, "repeat", repeat)
+	s.logger.Info("refund", "order_id", req.OrderID.String(), "provider_txn_id", req.ProviderTxnID,
+		"amount_vnd", req.AmountVND, "repeat", repeat)
 	httpx.WriteJSON(w, http.StatusOK, payment.RefundResponse{Status: payment.StatusSucceeded})
 }
 

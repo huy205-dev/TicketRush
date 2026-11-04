@@ -52,14 +52,15 @@ func run(ctx context.Context, lookupEnv func(string) (string, bool), stdout io.W
 	}
 
 	gw := fakepay.New(ctx, fakepay.Config{
-		WebhookSecret: cfg.WebhookSecret,
-		PublicURL:     cfg.PublicURL,
-		DelayMin:      cfg.DelayMin,
-		DelayMax:      cfg.DelayMax,
-		DuplicateRate: cfg.DuplicateRate,
-		LateRate:      cfg.LateRate,
-		LateExtra:     cfg.LateExtra,
-		FailRate:      cfg.FailRate,
+		WebhookSecret:  cfg.WebhookSecret,
+		PublicURL:      cfg.PublicURL,
+		DelayMin:       cfg.DelayMin,
+		DelayMax:       cfg.DelayMax,
+		DuplicateRate:  cfg.DuplicateRate,
+		LateRate:       cfg.LateRate,
+		LateExtra:      cfg.LateExtra,
+		FailRate:       cfg.FailRate,
+		CallbackPrefix: cfg.CallbackPrefix,
 	}, logger)
 
 	r := chi.NewRouter()
@@ -87,7 +88,8 @@ func run(ctx context.Context, lookupEnv func(string) (string, bool), stdout io.W
 		"public_url", cfg.PublicURL,
 		"delay_ms_min", cfg.DelayMin.Milliseconds(), "delay_ms_max", cfg.DelayMax.Milliseconds(),
 		"duplicate_rate", cfg.DuplicateRate, "late_rate", cfg.LateRate,
-		"late_extra_ms", cfg.LateExtra.Milliseconds(), "fail_rate", cfg.FailRate)
+		"late_extra_ms", cfg.LateExtra.Milliseconds(), "fail_rate", cfg.FailRate,
+		"callback_prefix", cfg.CallbackPrefix)
 	err = httpserver.Serve(ctx, srv, ln, httpserver.ShutdownTimeout)
 	gw.Wait()
 	if err != nil {
