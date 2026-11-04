@@ -91,11 +91,8 @@ func (s *Service) ApplyPayment(ctx context.Context, p payment.Webhook) (PaymentR
 		_, err = q.InsertPayment(ctx, orderdb.InsertPaymentParams{
 			ProviderTxnID: p.ProviderTxnID, OrderID: p.OrderID, AmountVnd: p.AmountVND, Status: p.Status,
 		})
-		if errors.Is(err, pgx.ErrNoRows) {
-			res.Outcome, res.Status = OutcomeDuplicate, Status(row.Status)
-			return nil
-		}
-		if err != nil {
+		duplicate := errors.Is(err, pgx.ErrNoRows)
+		if err != nil && !duplicate {
 			return fmt.Errorf("record payment: %w", err)
 		}
 
@@ -108,6 +105,15 @@ func (s *Service) ApplyPayment(ctx context.Context, p payment.Webhook) (PaymentR
 			IdempotencyKey: row.IdempotencyKey, RequestHash: row.RequestHash, HoldExpiresAt: row.HoldExpiresAt,
 			CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt,
 		}, seats)
+
+		if duplicate {
+			res.Outcome, res.Status = OutcomeDuplicate, o.Status
+			// The first delivery may have committed and then lost its reply
+			// or died before confirm.lua ran. Confirm is idempotent, so a
+			// resend repairs Redis instead of leaving the seats merely held.
+			after.confirm = o.Status == StatusPaid || o.Status == StatusTicketed
+			return nil
+		}
 
 		pt := paymentTx{s: s, tx: tx, q: q, p: p, o: o}
 		res, after, err = pt.decide(ctx, row.HoldActive)
@@ -191,9 +197,11 @@ func (pt paymentTx) decide(ctx context.Context, holdActive bool) (PaymentResult,
 			return PaymentResult{}, afterCommit{}, err
 		}
 		if !ok {
-			// Re-held in the inventory but ticketed elsewhere: give the short
-			// hold back and refund.
-			return pt.refund(ctx, ReasonLatePaymentSeatTaken, StatusRefunding, afterCommit{release: true})
+			// The inventory let us re-hold a seat that already has a ticket:
+			// the same wrong-inventory event as on the on-time path.
+			pt.s.logger.ErrorContext(ctx, "double sell prevented by tickets UNIQUE constraint",
+				"seat_ids", pt.o.SeatIDs())
+			return pt.refund(ctx, ReasonSeatConflict, StatusRefunding, afterCommit{release: true})
 		}
 		return pt.pay(ctx)
 
