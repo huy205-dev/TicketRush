@@ -40,7 +40,12 @@ GOOSE := goose -dir migrations postgres "$$DATABASE_URL"
 migrate: .env ## goose up
 	$(LOAD_ENV) $(GOOSE) up
 
-db-reset: .env ## XOÁ SẠCH dữ liệu (goose reset rồi up), chỉ dùng cho dev
+# Redis only holds state derived from PostgreSQL, so it is wiped as well:
+# seat keys (sold:<order>) and notifier dedupe keys left over
+# from the old data would contradict the fresh database. Redis goes first:
+# an empty Redis can be rebuilt from PostgreSQL, a stale one cannot.
+db-reset: .env ## XOÁ SẠCH dữ liệu: FLUSHALL Redis, rồi goose reset và up; chỉ dùng cho dev
+	$(COMPOSE) exec -T redis redis-cli FLUSHALL
 	$(LOAD_ENV) $(GOOSE) reset && $(GOOSE) up
 
 seed: .env ## Tạo sự kiện mẫu 5.000 ghế (sau db-reset thì event_id = 1)
