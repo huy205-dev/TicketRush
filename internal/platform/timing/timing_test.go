@@ -12,6 +12,7 @@ func TestStats(t *testing.T) {
 	AddDBAcquire(ctx, 1500*time.Microsecond)
 	AddDBQuery(ctx, 700*time.Microsecond)
 	AddRedis(ctx, 300*time.Microsecond)
+	AddPayment(ctx, 4*time.Millisecond)
 
 	got := map[string]any{}
 	for _, a := range s.LogAttrs() {
@@ -21,6 +22,7 @@ func TestStats(t *testing.T) {
 		"db_acquire_ms": 3.5, "db_acquires": int64(2),
 		"db_query_ms": 0.7, "db_queries": int64(1),
 		"redis_ms": 0.3, "redis_cmds": int64(1),
+		"payment_ms": 4.0, "payment_calls": int64(1),
 	}
 	for k, v := range want {
 		if got[k] != v {

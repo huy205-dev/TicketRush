@@ -1,6 +1,7 @@
 // Package timing records, per request, the time spent waiting for a
-// PostgreSQL connection, running PostgreSQL queries and talking to Redis, so
-// that access logs can show where a request's latency comes from.
+// PostgreSQL connection, running PostgreSQL queries, talking to Redis and
+// calling the payment gateway, so that access logs can show where a
+// request's latency comes from.
 //
 // The postgres and redisx packages feed it through a pgx tracer and a
 // go-redis hook; httpx.AccessLog attaches a Stats to each request and logs
@@ -20,6 +21,7 @@ type Stats struct {
 	dbAcquire, dbAcquires atomic.Int64
 	dbQuery, dbQueries    atomic.Int64
 	redis, redisCmds      atomic.Int64
+	payment, paymentCalls atomic.Int64
 }
 
 type ctxKey struct{}
@@ -59,6 +61,14 @@ func AddRedis(ctx context.Context, d time.Duration) {
 	}
 }
 
+// AddPayment records one call to the payment gateway.
+func AddPayment(ctx context.Context, d time.Duration) {
+	if s := from(ctx); s != nil {
+		s.payment.Add(int64(d))
+		s.paymentCalls.Add(1)
+	}
+}
+
 func ms(ns int64) float64 { return float64(ns/1000) / 1000 }
 
 // LogAttrs returns the recorded totals as log attributes, omitting the
@@ -73,6 +83,9 @@ func (s *Stats) LogAttrs() []slog.Attr {
 	}
 	if n := s.redisCmds.Load(); n > 0 {
 		attrs = append(attrs, slog.Float64("redis_ms", ms(s.redis.Load())), slog.Int64("redis_cmds", n))
+	}
+	if n := s.paymentCalls.Load(); n > 0 {
+		attrs = append(attrs, slog.Float64("payment_ms", ms(s.payment.Load())), slog.Int64("payment_calls", n))
 	}
 	return attrs
 }
