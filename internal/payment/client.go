@@ -43,10 +43,16 @@ type Client struct {
 	http    *http.Client
 }
 
+// maxIdleConnsPerHost keeps enough warm connections to the gateway for a
+// burst of orders; http.DefaultTransport keeps only 2 per host.
+const maxIdleConnsPerHost = 64
+
 // NewClient returns a client for fakepay at baseURL. Every call is bounded
 // by timeout.
 func NewClient(baseURL string, timeout time.Duration) *Client {
-	return &Client{baseURL: baseURL, http: &http.Client{Timeout: timeout}}
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.MaxIdleConnsPerHost = maxIdleConnsPerHost
+	return &Client{baseURL: baseURL, http: &http.Client{Timeout: timeout, Transport: tr}}
 }
 
 // CreatePayment registers the payment and returns the page where the buyer

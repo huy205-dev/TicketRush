@@ -21,6 +21,7 @@ import (
 	"github.com/huy205-dev/ticketrush/internal/order"
 	"github.com/huy205-dev/ticketrush/internal/payment"
 	"github.com/huy205-dev/ticketrush/internal/platform/logging"
+	"github.com/huy205-dev/ticketrush/internal/platform/timing"
 	"github.com/huy205-dev/ticketrush/internal/ticket"
 )
 
@@ -31,6 +32,12 @@ const seatMapTTL = 500 * time.Millisecond
 // paymentLinkTimeout bounds the call to fakepay made while answering a
 // create or get (SPEC.md 9.1 step 9).
 const paymentLinkTimeout = 2 * time.Second
+
+// Bounds of the in-process caches; see caches.go.
+const (
+	paymentLinkCacheSize = 50_000
+	qrCacheSize          = 10_000
+)
 
 // paymentLinks registers payments with the gateway (payment.Client).
 type paymentLinks interface {
@@ -55,10 +62,12 @@ type apiDeps struct {
 type api struct {
 	apiDeps
 	seatMaps *seatMapCache
+	links    *paymentLinkCache
+	qrs      *qrCache
 }
 
 func newAPI(d apiDeps) *api {
-	a := &api{apiDeps: d}
+	a := &api{apiDeps: d, links: newPaymentLinkCache(paymentLinkCacheSize), qrs: newQRCache(qrCacheSize)}
 	a.seatMaps = newSeatMapCache(seatMapTTL, a.renderSeatMap)
 	return a
 }
@@ -285,26 +294,34 @@ func (a *api) handleCreateOrder(w http.ResponseWriter, r *http.Request) {
 		status = http.StatusCreated
 	}
 	resp := toOrderResponse(o)
-	resp.PaymentURL = a.paymentURL(r.Context(), o)
+	resp.PaymentURL = a.paymentURL(logging.With(r.Context(), slog.String("order_id", o.ID.String())), o)
 	httpx.WriteJSON(w, status, resp)
 }
 
 // paymentURL registers o with the gateway and returns where to pay. Only a
 // HELD order can be paid. If the gateway is slow or down the order is still
 // returned without a link; the client gets it later from GET /v1/orders/{id}.
+// A link registered once is served from memory until the hold ends, so
+// polling a HELD order does not call the gateway each time.
 func (a *api) paymentURL(ctx context.Context, o *order.Order) string {
 	if a.payments == nil || o.Status != order.StatusHeld {
 		return ""
 	}
+	if u, ok := a.links.get(o.ID); ok {
+		return u
+	}
 	ctx, cancel := context.WithTimeout(ctx, paymentLinkTimeout)
 	defer cancel()
+	start := time.Now()
 	u, err := a.payments.CreatePayment(ctx, payment.CreatePaymentRequest{
 		OrderID: o.ID, AmountVND: o.TotalVND, CallbackURL: a.callbackURL,
 	})
+	timing.AddPayment(ctx, time.Since(start))
 	if err != nil {
 		a.logger.WarnContext(ctx, "payment link unavailable; the client can fetch it later", "err", err)
 		return ""
 	}
+	a.links.put(o.ID, u, o.HoldExpiresAt)
 	return u
 }
 
@@ -345,6 +362,8 @@ func (a *api) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteErr(w, r, a.logger, err)
 		return
 	}
+	r = r.WithContext(logging.With(r.Context(),
+		slog.String("order_id", wh.OrderID.String()), slog.String("provider_txn_id", wh.ProviderTxnID)))
 	res, err := a.orders.ApplyPayment(r.Context(), wh)
 	if err != nil {
 		httpx.WriteErr(w, r, a.logger, err)
@@ -398,9 +417,12 @@ func (a *api) issuedTickets(ctx context.Context, userID int64, orderID uuid.UUID
 		}
 		tr := ticketResponse{TicketID: t.ID, SeatID: t.SeatID, IssuedAt: t.IssuedAt.UTC(), QRPayload: t.QRPayload}
 		if withPNG {
-			png, err := ticket.PNG(t.QRPayload)
-			if err != nil {
-				return nil, err
+			png, ok := a.qrs.get(t.ID)
+			if !ok {
+				if png, err = ticket.PNG(t.QRPayload); err != nil {
+					return nil, err
+				}
+				a.qrs.put(t.ID, png)
 			}
 			tr.QRPNGBase64 = base64.StdEncoding.EncodeToString(png)
 		}
