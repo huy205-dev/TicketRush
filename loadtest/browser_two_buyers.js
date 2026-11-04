@@ -3,15 +3,19 @@
 // room (SSE), seat map, order with the admission token, fakepay's payment
 // page, and the QR code once the ticket service has issued the ticket.
 //
-// Drives the installed Chrome headless with k6's browser module; each buyer
-// has its own browser context (its own sessionStorage), and both run at
-// the same time. Needs the whole system running behind nginx:
+// Drives the installed Chrome headless with k6's browser module: one browser
+// context, one tab per buyer (the frontend keeps its state in the tab's
+// sessionStorage), both buying at the same time; fakepay opens in a third
+// tab. Needs the whole system running behind nginx:
 //   make up && make migrate && make seed (once)
 //   REQUIRE_ADMISSION=true booking, waitingroom, relay, ticket, fakepay
 //   (FAKEPAY_LATE_RATE=0, so no webhook waits 11 minutes)
 // Run: make e2e-browser   (BASE_URL defaults to http://localhost:8000)
 import { browser } from "k6/browser";
 import { check } from "k6";
+import { Counter } from "k6/metrics";
+
+const buyersDone = new Counter("buyers_done");
 
 export const options = {
   scenarios: {
@@ -21,7 +25,8 @@ export const options = {
       options: { browser: { type: "chromium" } },
     },
   },
-  thresholds: { checks: ["rate==1.0"] },
+  // Zero checks would pass "rate==1.0"; the counter proves both finished.
+  thresholds: { checks: ["rate==1.0"], buyers_done: ["count==2"] },
 };
 
 const BASE = __ENV.BASE_URL || "http://localhost:8000";
@@ -30,20 +35,26 @@ const run = Math.floor(Date.now() / 1000) % 100000;
 const buyers = [{ id: 900000 + run * 2 }, { id: 900001 + run * 2 }];
 
 export default async function () {
-  const contexts = [await browser.newContext(), await browser.newContext()];
+  const context = await browser.newContext();
   try {
-    const results = await Promise.all(buyers.map((b, i) => buy(contexts[i], b, i)));
+    // Tabs are opened one at a time (the browser module cannot open two at
+    // once); the two purchases then run concurrently.
+    const tabs = [];
+    for (let i = 0; i < buyers.length; i++) tabs.push({ shop: await context.newPage(), pay: await context.newPage() });
+    const results = await Promise.all(buyers.map((b, i) => buy(tabs[i], b, i)));
     check(results, {
       "both buyers got different seats": (r) => r[0].seat !== r[1].seat,
       "both buyers got a QR ticket": (r) => r.every((x) => x.qr),
     });
+  } catch (e) {
+    check(null, { [`flow completed: ${e}`]: () => false });
+    throw e;
   } finally {
-    for (const c of contexts) await c.close();
+    await context.close();
   }
 }
 
-async function buy(context, buyer, i) {
-  const page = await context.newPage();
+async function buy({ shop: page, pay }, buyer, i) {
   const step = (name, ok) => check(ok, { [`buyer ${i + 1}: ${name}`]: (v) => v });
 
   await page.goto(BASE + "/");
@@ -76,7 +87,6 @@ async function buy(context, buyer, i) {
     if (!payURL) await page.waitForTimeout(500);
   }
   step("payment link received", !!payURL);
-  const pay = await context.newPage();
   await pay.goto(payURL);
   await pay.locator("button.ok").click();
   await pay.waitForSelector("#result:not(:empty)");
@@ -90,5 +100,6 @@ async function buy(context, buyer, i) {
   step("QR ticket shown", qr);
   await page.screenshot({ path: `loadtest/out/browser-buyer-${i + 1}.png`, fullPage: true });
   await page.close();
+  buyersDone.add(1);
   return { seat, qr };
 }
