@@ -1,6 +1,7 @@
 package config
 
 import (
+	"math"
 	"strconv"
 	"time"
 )
@@ -21,20 +22,25 @@ type Fakepay struct {
 	// FailRate is the chance that fakepay treats a delivered webhook as
 	// failed and sends it again (FAKEPAY_5XX_RATE).
 	FailRate float64
+	// CallbackPrefix is booking's PUBLIC_BASE_URL: fakepay only delivers
+	// webhooks to callback URLs under it, so it cannot be used to post signed
+	// requests anywhere else.
+	CallbackPrefix string
 }
 
-// LoadFakepay reads FAKEPAY_* and WEBHOOK_SECRET.
+// LoadFakepay reads FAKEPAY_*, WEBHOOK_SECRET and PUBLIC_BASE_URL.
 func LoadFakepay(lookup func(string) (string, bool)) (*Fakepay, error) {
 	p := &parser{lookup: lookup}
 	c := &Fakepay{
-		WebhookSecret: p.secret("WEBHOOK_SECRET"),
-		PublicURL:     p.httpURL("FAKEPAY_URL", "http://localhost:8090"),
-		DelayMin:      p.millis("FAKEPAY_DELAY_MS_MIN", 100),
-		DelayMax:      p.millis("FAKEPAY_DELAY_MS_MAX", 2000),
-		DuplicateRate: p.rate("FAKEPAY_DUPLICATE_RATE", 0.2),
-		LateRate:      p.rate("FAKEPAY_LATE_RATE", 0.05),
-		LateExtra:     p.millis("FAKEPAY_LATE_EXTRA_MS", 660_000),
-		FailRate:      p.rate("FAKEPAY_5XX_RATE", 0.1),
+		WebhookSecret:  p.secret("WEBHOOK_SECRET"),
+		PublicURL:      p.httpURL("FAKEPAY_URL", "http://localhost:8090"),
+		DelayMin:       p.millis("FAKEPAY_DELAY_MS_MIN", 100),
+		DelayMax:       p.millis("FAKEPAY_DELAY_MS_MAX", 2000),
+		DuplicateRate:  p.rate("FAKEPAY_DUPLICATE_RATE", 0.2),
+		LateRate:       p.rate("FAKEPAY_LATE_RATE", 0.05),
+		LateExtra:      p.millis("FAKEPAY_LATE_EXTRA_MS", 660_000),
+		FailRate:       p.rate("FAKEPAY_5XX_RATE", 0.1),
+		CallbackPrefix: p.httpURL("PUBLIC_BASE_URL", "http://localhost:8080"),
 	}
 	if c.DelayMin > c.DelayMax {
 		p.fail("FAKEPAY_DELAY_MS_MIN must not exceed FAKEPAY_DELAY_MS_MAX")
@@ -52,8 +58,8 @@ func (p *parser) millis(key string, def int64) time.Duration {
 		return time.Duration(def) * time.Millisecond
 	}
 	n, err := strconv.ParseInt(v, 10, 64)
-	if err != nil || n < 0 {
-		p.fail("%s must be a non-negative number of milliseconds, got %q", key, v)
+	if err != nil || n < 0 || n > math.MaxInt64/int64(time.Millisecond) {
+		p.fail("%s must be a non-negative number of milliseconds that fits a duration, got %q", key, v)
 		return time.Duration(def) * time.Millisecond
 	}
 	return time.Duration(n) * time.Millisecond
@@ -66,7 +72,8 @@ func (p *parser) rate(key string, def float64) float64 {
 		return def
 	}
 	f, err := strconv.ParseFloat(v, 64)
-	if err != nil || f < 0 || f > 1 {
+	// ParseFloat accepts "NaN", which fails every comparison below.
+	if err != nil || math.IsNaN(f) || f < 0 || f > 1 {
 		p.fail("%s must be a number between 0 and 1, got %q", key, v)
 		return def
 	}
