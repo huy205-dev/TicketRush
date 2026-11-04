@@ -20,6 +20,13 @@ var (
 	// ErrTemporarilyUnavailable means a dependency needed to process the
 	// request safely did not answer; the client should retry later.
 	ErrTemporarilyUnavailable = errors.New("temporarily unavailable")
+
+	// ErrAdmissionRequired means the request has no valid admission token
+	// for this user and this event (SPEC.md 7.1).
+	ErrAdmissionRequired = errors.New("admission required")
+	// ErrAdmissionAlreadyUsed means the admission token already created
+	// another order.
+	ErrAdmissionAlreadyUsed = errors.New("admission already used")
 )
 
 // ValidationError explains which input was rejected. It matches

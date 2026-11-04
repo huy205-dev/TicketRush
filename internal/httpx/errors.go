@@ -39,6 +39,9 @@ var errorMappings = []errorMapping{
 	{order.ErrActiveOrderExists, http.StatusConflict, "ACTIVE_ORDER_EXISTS", "Bạn đang có một đơn giữ ghế cho sự kiện này", ""},
 	{order.ErrNotCancellable, http.StatusConflict, "ORDER_NOT_CANCELLABLE", "Đơn không ở trạng thái có thể hủy", ""},
 	{order.ErrNotFound, http.StatusNotFound, "ORDER_NOT_FOUND", "Không tìm thấy đơn hàng", ""},
+	{order.ErrAdmissionRequired, http.StatusForbidden, "ADMISSION_REQUIRED", "Cần vào hàng chờ và được cho vào trước khi đặt vé", ""},
+	{auth.ErrInvalidAdmission, http.StatusForbidden, "ADMISSION_REQUIRED", "Cần vào hàng chờ và được cho vào trước khi đặt vé", ""},
+	{order.ErrAdmissionAlreadyUsed, http.StatusForbidden, "ADMISSION_ALREADY_USED", "Lượt vào này đã dùng để tạo một đơn khác", ""},
 	{catalog.ErrEventNotFound, http.StatusNotFound, "EVENT_NOT_FOUND", "Không tìm thấy sự kiện", ""},
 	{order.ErrTemporarilyUnavailable, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Hệ thống tạm thời không xử lý được, vui lòng thử lại", "1"},
 }

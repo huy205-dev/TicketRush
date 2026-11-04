@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/huy205-dev/ticketrush/internal/auth"
 	"github.com/huy205-dev/ticketrush/internal/catalog"
 	"github.com/huy205-dev/ticketrush/internal/events"
 	"github.com/huy205-dev/ticketrush/internal/inventory"
@@ -45,13 +46,25 @@ type Locker interface {
 	TryLock(ctx context.Context, key string, ttl time.Duration) (unlock func(context.Context) error, ok bool, err error)
 }
 
-// Config holds the timing settings of the service.
+// AdmissionLedger records which order each admission token created, so a
+// token creates at most one order (SPEC.md 9.1 step 5); see queue.Ledger.
+type AdmissionLedger interface {
+	// Claim marks jti as used by orderID; false means another order has it.
+	Claim(ctx context.Context, jti, orderID uuid.UUID) (bool, error)
+	// Unclaim gives the token back if orderID still holds it.
+	Unclaim(ctx context.Context, jti, orderID uuid.UUID) error
+}
+
+// Config holds the settings of the service.
 type Config struct {
 	// HoldTTL is how long PostgreSQL accepts payment for a held order.
 	HoldTTL time.Duration
 	// HoldGrace is added to the inventory hold so no one can re-hold a seat
 	// before PostgreSQL considers the old order expired (SPEC.md 6.2).
 	HoldGrace time.Duration
+	// Admissions is needed by CreateAdmitted only; nil when booking runs
+	// with REQUIRE_ADMISSION=false.
+	Admissions AdmissionLedger
 }
 
 // Order is an order with its seats.
@@ -84,13 +97,14 @@ func (o *Order) SeatIDs() []string {
 
 // Service implements the order use cases.
 type Service struct {
-	pool      *pgxpool.Pool
-	catalog   *catalog.Service
-	inv       inventory.Inventory
-	locks     Locker
-	holdTTL   time.Duration
-	holdGrace time.Duration
-	logger    *slog.Logger
+	pool       *pgxpool.Pool
+	catalog    *catalog.Service
+	inv        inventory.Inventory
+	locks      Locker
+	holdTTL    time.Duration
+	holdGrace  time.Duration
+	admissions AdmissionLedger
+	logger     *slog.Logger
 }
 
 // NewService wires the order service. locks guards Idempotency-Keys against
@@ -98,14 +112,36 @@ type Service struct {
 func NewService(pool *pgxpool.Pool, cat *catalog.Service, inv inventory.Inventory, locks Locker, cfg Config, logger *slog.Logger) *Service {
 	return &Service{
 		pool: pool, catalog: cat, inv: inv, locks: locks,
-		holdTTL: cfg.HoldTTL, holdGrace: cfg.HoldGrace, logger: logger,
+		holdTTL: cfg.HoldTTL, holdGrace: cfg.HoldGrace, admissions: cfg.Admissions, logger: logger,
 	}
 }
 
-// Create places a HELD order (SPEC.md 9.1). The bool is false when the
+// Create places a HELD order (SPEC.md 9.1) without an admission token, for
+// booking running with REQUIRE_ADMISSION=false. The bool is false when the
 // Idempotency-Key was already used with the same request and the existing
 // order is returned instead.
 func (s *Service) Create(ctx context.Context, userID int64, key uuid.UUID, req CreateRequest) (*Order, bool, error) {
+	return s.create(ctx, userID, key, req, nil)
+}
+
+// CreateAdmitted places a HELD order for a buyer the waiting room admitted
+// (SPEC.md 9.1 steps 1 and 5). The admission must be this user's and for
+// this event. A replay of the same Idempotency-Key returns the existing
+// order without using the admission again; otherwise the admission is
+// claimed for the new order before the seats are held, and given back when
+// the request ends without creating one (seats taken, an active order,
+// an error), so the buyer can try other seats.
+func (s *Service) CreateAdmitted(ctx context.Context, userID int64, key uuid.UUID, req CreateRequest, adm auth.Admission) (*Order, bool, error) {
+	if adm.UserID != userID || adm.EventID != req.EventID {
+		return nil, false, fmt.Errorf("%w: token is for user %d and event %d", ErrAdmissionRequired, adm.UserID, adm.EventID)
+	}
+	if s.admissions == nil {
+		return nil, false, errors.New("create admitted order: no admission ledger configured")
+	}
+	return s.create(ctx, userID, key, req, &adm)
+}
+
+func (s *Service) create(ctx context.Context, userID int64, key uuid.UUID, req CreateRequest, adm *auth.Admission) (*Order, bool, error) {
 	ev, err := s.catalog.Event(ctx, req.EventID)
 	if errors.Is(err, catalog.ErrEventNotFound) {
 		return nil, false, NewValidationError("event_id", "unknown event")
@@ -151,6 +187,21 @@ func (s *Service) Create(ctx context.Context, userID int64, key uuid.UUID, req C
 	}
 	defer s.unlock(ctx, unlock)
 
+	orderID, err := uuid.NewV7()
+	if err != nil {
+		return nil, false, fmt.Errorf("generate order id: %w", err)
+	}
+	ctx = logging.With(ctx, slog.String("order_id", orderID.String()))
+
+	// An admission claimed for orderID is given back unless the order is
+	// created: a replay, taken seats or an error leave the token usable.
+	claimed, created := false, false
+	defer func() {
+		if claimed && !created {
+			s.unclaim(ctx, adm.JTI, orderID)
+		}
+	}()
+
 	// The lock is advisory: if it expired mid-request or Redis lost it, the
 	// UNIQUE (user_id, idempotency_key) constraint still admits one order and
 	// the second round below turns the loser into a replay.
@@ -165,11 +216,18 @@ func (s *Service) Create(ctx context.Context, userID int64, key uuid.UUID, req C
 			return nil, false, err
 		}
 
-		orderID, err := uuid.NewV7()
-		if err != nil {
-			return nil, false, fmt.Errorf("generate order id: %w", err)
+		if adm != nil && !claimed {
+			ok, err := s.admissions.Claim(ctx, adm.JTI, orderID)
+			if err != nil {
+				// Like the idempotency lock: without Redis the token's single
+				// use cannot be guaranteed, so refuse (fail closed).
+				return nil, false, fmt.Errorf("%w: admission ledger: %w", ErrTemporarilyUnavailable, err)
+			}
+			if !ok {
+				return nil, false, ErrAdmissionAlreadyUsed
+			}
+			claimed = true
 		}
-		ctx := logging.With(ctx, slog.String("order_id", orderID.String()))
 
 		taken, err := s.inv.Hold(ctx, ev.ID, norm.SeatIDs, orderID, s.holdTTL+s.holdGrace)
 		if err != nil {
@@ -181,6 +239,7 @@ func (s *Service) Create(ctx context.Context, userID int64, key uuid.UUID, req C
 
 		o, err := s.insertHeld(ctx, orderID, userID, idemKey, hash, ev, norm)
 		if err == nil {
+			created = true
 			return o, true, nil
 		}
 		s.release(ctx, ev.ID, norm.SeatIDs, orderID)
@@ -381,6 +440,16 @@ func releaseSeats(ctx context.Context, inv inventory.Inventory, logger *slog.Log
 	if err := inv.Release(ctx, eventID, seatIDs, orderID); err != nil {
 		logger.WarnContext(ctx, "release seats failed; they free up when the hold expires",
 			"err", err, "seat_ids", seatIDs)
+	}
+}
+
+// unclaim gives an admission back, detached from the request like release.
+func (s *Service) unclaim(ctx context.Context, jti, orderID uuid.UUID) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), releaseTimeout)
+	defer cancel()
+	if err := s.admissions.Unclaim(ctx, jti, orderID); err != nil {
+		// The claim expires with the token (ADMISSION_TTL).
+		s.logger.WarnContext(ctx, "give back admission failed; the buyer must queue again", "err", err)
 	}
 }
 
