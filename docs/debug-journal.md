@@ -12,6 +12,21 @@ Mỗi lỗi khó gặp phải được ghi theo mẫu dưới đây, mới nhấ
 **Bài học:**
 ```
 
+## 2026-11-04 — testcontainers báo "rootless Docker not found" dù `docker` vẫn chạy
+
+**Triệu chứng:** mọi package có test tích hợp đều fail trong khoảng 1 giây với lỗi `get provider: rootless Docker not found, failed to create Docker provider`, trong khi `docker info` và `make up` vẫn chạy bình thường.
+
+**Cách điều tra:**
+- `ls -la /var/run/docker.sock` không còn file.
+- `docker context ls` cho thấy CLI đang dùng context `orbstack` (`unix:///Users/huypham/.orbstack/run/docker.sock`), và trên máy có thêm context `desktop-linux` của Docker Desktop.
+- Docker CLI đi theo context, còn testcontainers-go tìm `DOCKER_HOST`, `~/.testcontainers.properties` rồi tới `/var/run/docker.sock`. Symlink do OrbStack tạo ở `/var/run/docker.sock` đã mất sau khi OrbStack cập nhật lên 29.8.2, hoặc sau khi cài Docker Desktop.
+
+**Nguyên nhân gốc:** không có biến nào chỉ cho testcontainers socket của OrbStack, nên nó thử mọi đường dẫn mặc định rồi dừng ở bước tìm Docker rootless.
+
+**Cách sửa:** chạy test với `DOCKER_HOST=unix://$HOME/.orbstack/run/docker.sock` (cấu hình máy và repo không đổi). Muốn khỏi phải đặt mỗi lần thì bật lại tuỳ chọn tạo symlink `/var/run/docker.sock` trong cài đặt của OrbStack, hoặc thêm `docker.host=unix:///Users/<user>/.orbstack/run/docker.sock` vào `~/.testcontainers.properties`.
+
+**Bài học:** khi "Docker chạy được" mà testcontainers không chạy được, cần kiểm tra socket mà testcontainers thật sự dùng, chứ không phải context của Docker CLI.
+
 ## 2026-11-04 — Expiry worker xoá hold của một lần thanh toán trễ
 
 **Triệu chứng:** review độc lập M4 mô tả một kịch bản (hai lượt review tìm ra, bốn lần kiểm chứng xác nhận). Một đơn đã hết hạn được trả tiền muộn, PostgreSQL xuất vé cho người trả trễ, nhưng Redis lại để người mua khác giữ ghế đó. Không có test nào bắt được.

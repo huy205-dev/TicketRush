@@ -6,19 +6,23 @@ Khi mở bán một concert, hàng chục nghìn người cùng bấm vào vài 
 
 Đặc tả đầy đủ: [SPEC.md](SPEC.md).
 
-> **Trạng thái:** xong **M4 – fakepay, webhook và saga**. Hệ thống đã có:
+> **Trạng thái:** xong **M5 – phòng chờ ảo**. Hệ thống đã có:
 > - giữ ghế bằng Redis (mặc định) hoặc PostgreSQL;
 > - tạo, xem, huỷ đơn với Idempotency-Key;
 > - expiry worker đưa đơn quá hạn sang `EXPIRED` và nhả ghế;
 > - relay đẩy mọi sự kiện đơn hàng từ outbox lên Kafka;
 > - thanh toán qua cổng giả lập fakepay (webhook trễ, trùng, gửi lại), đủ mọi nhánh của SPEC 9.3;
-> - xuất vé có QR, hoàn tiền khi không giao được vé, thông báo qua log hoặc Telegram.
+> - xuất vé có QR, hoàn tiền khi không giao được vé, thông báo qua log hoặc Telegram;
+> - phòng chờ ảo: vào hàng, vị trí qua SSE, cấp admission token theo đúng thứ tự vào hàng; mỗi token tạo được một đơn;
+> - frontend trong trình duyệt và nginx phía trước, có rate limit theo IP.
 >
-> Chưa có: phòng chờ, frontend.
+> Chưa có: metrics và tracing (M6), các kịch bản tải đầy đủ (M7), chaos (M8).
 
 ## Demo
 
-Chưa có (dự kiến sau M5).
+Chạy cả hệ thống (mục [Chạy local](#chạy-local)) rồi mở http://localhost:8000. Đăng nhập bằng một user id bất kỳ, vào hàng chờ, chọn ghế khi đến lượt, thanh toán trên trang fakepay; trang đơn tự hiện mã QR khi vé được xuất. Mỗi tab là một người mua riêng.
+
+`make e2e-browser` chạy đúng luồng đó cho hai người mua ở hai tab cùng lúc, bằng Chrome headless ([kết quả](docs/progress/m5.md#chạy-thử-đầu–cuối)).
 
 ## Kiến trúc
 
@@ -76,6 +80,7 @@ Danh sách đầy đủ ở [docs/adr/](docs/adr/README.md).
 - [ADR-001](docs/adr/001-giu-ghe-bang-redis-lua.md): giữ ghế bằng script Lua trong Redis; hash tag theo sự kiện; `HOLD_GRACE`.
 - [ADR-002](docs/adr/002-transactional-outbox.md): transactional outbox + relay thay vì gửi Kafka trực tiếp; at-least-once; một relay để giữ thứ tự theo đơn.
 - [ADR-003](docs/adr/003-saga-va-bu-tru-bang-hoan-tien.md): saga dạng choreography; mọi nhánh webhook quyết định trong một transaction; bù trừ bằng hoàn tiền; idempotency ở từng bước.
+- [ADR-004](docs/adr/004-cach-chon-admit-batch.md): `ADMIT_BATCH = 200` tính từ throughput đo được của booking, giữ tải xấu nhất ở khoảng 27% năng lực đo được.
 - [ADR-005](docs/adr/005-idempotency-key.md): Idempotency-Key: hash trên request đã chuẩn hoá. Khoá Redis cho request đang chạy trả `409 IDEMPOTENCY_KEY_IN_PROGRESS`; khi Redis không trả lời thì trả `503` (fail closed).
 - [ADR-006](docs/adr/006-lua-chon-khi-spec-chua-ro-m1.md): các lựa chọn khi SPEC chưa nói rõ ở M1.
 
@@ -86,12 +91,20 @@ Danh sách đầy đủ ở [docs/adr/](docs/adr/README.md).
 | POST | `/v1/auth/dev-login` | `{"user_id": 123}` → JWT 24 h. Chỉ bật khi `APP_ENV=dev` |
 | GET | `/v1/events/{id}` | Thông tin sự kiện, các khu và giá |
 | GET | `/v1/events/{id}/seats` | 5.000 ghế kèm trạng thái và `version`; cache 500 ms, gzip; `ETag` + `If-None-Match` → `304` |
-| POST | `/v1/orders` | Cần `Authorization` và `Idempotency-Key` (UUID). 201 tạo mới, 200 gửi lại, 409 `IDEMPOTENCY_KEY_IN_PROGRESS` khi request cùng key đang chạy. Có `payment_url` khi đơn `HELD` |
+| POST | `/v1/orders` | Cần `Authorization`, `Idempotency-Key` (UUID) và `X-Admission-Token` từ phòng chờ (khi `REQUIRE_ADMISSION=true`, mặc định). 201 tạo mới, 200 gửi lại, 403 `ADMISSION_REQUIRED` / `ADMISSION_ALREADY_USED`, 409 `IDEMPOTENCY_KEY_IN_PROGRESS` khi request cùng key đang chạy. Có `payment_url` khi đơn `HELD` |
 | GET | `/v1/orders/{id}` | Chỉ chủ đơn xem được; kèm danh sách vé khi đã `TICKETED` |
 | POST | `/v1/orders/{id}/cancel` | Chỉ khi `HELD`; huỷ lại đơn đã huỷ vẫn trả 200 |
 | GET | `/v1/orders/{id}/tickets` | Vé đã xuất, kèm QR dạng PNG base64 |
 | POST | `/v1/webhooks/fakepay` | Không cần token; `X-Signature` = hex HMAC-SHA256 của raw body. Sai chữ ký trả 401, đã ghi nhận trả 200 (kể cả webhook trùng) |
 | GET | `/healthz`, `/readyz` | readyz kiểm tra PostgreSQL và Redis |
+| GET | `/`, `/app.js`, `/style.css` | Frontend |
+
+Phòng chờ (`:8081`, qua nginx cùng origin với booking):
+
+| Method | Đường dẫn | Ghi chú |
+|---|---|---|
+| POST | `/v1/queue/{id}/join` | Cần `Authorization`. `{"queue_id", "position"}`; gọi lại trả đúng `queue_id` cũ, `position` 0 nghĩa là đã được cho vào |
+| GET | `/v1/queue/{id}/stream?queue_id=…` | Server-Sent Events: `position` mỗi 2 giây, rồi `admitted` kèm `admission_token`; `expired` nếu không còn trong hàng |
 
 Lỗi luôn có dạng `{"error": {"code", "message", "details"}}`. Bảng mã lỗi ở [internal/httpx/errors.go](internal/httpx/errors.go).
 
@@ -117,19 +130,24 @@ make run-fakepay   # terminal khác: cổng thanh toán giả lập trên :8090
 make run-ticket    # terminal khác: order.paid → sinh QR, đơn → TICKETED
 make run-refunder  # terminal khác: order.refund_requested → fakepay hoàn tiền
 make run-notifier  # terminal khác: log (hoặc Telegram) khi xuất vé, hoàn tiền
+make run-waitingroom  # terminal khác: phòng chờ trên :8081
 ```
+
+Sau đó mở http://localhost:8000 (nginx, chạy trong `make up`). Nếu `.env` được tạo từ mẫu trước M5 thì có dòng `REQUIRE_ADMISSION=false`: xoá dòng đó để booking đòi admission token.
 
 Xem sự kiện trên Kafka: mở Redpanda Console tại http://localhost:8088, hoặc chạy `docker compose -f deploy/compose.yaml exec redpanda rpk topic consume orders.v1`.
 
-Thử một lượt mua:
+Thử một lượt mua bằng curl, qua nginx:
 
 ```sh
-TOKEN=$(curl -s -X POST localhost:8080/v1/auth/dev-login -d '{"user_id":123}' | jq -r .access_token)
-curl -s -X POST localhost:8080/v1/orders \
-  -H "Authorization: Bearer $TOKEN" -H "Idempotency-Key: $(uuidgen)" \
+TOKEN=$(curl -s -X POST localhost:8000/v1/auth/dev-login -d '{"user_id":123}' | jq -r .access_token)
+QID=$(curl -s -X POST localhost:8000/v1/queue/1/join -H "Authorization: Bearer $TOKEN" | jq -r .queue_id)
+curl -sN "localhost:8000/v1/queue/1/stream?queue_id=$QID"   # chờ sự kiện admitted, lấy admission_token
+curl -s -X POST localhost:8000/v1/orders \
+  -H "Authorization: Bearer $TOKEN" -H "Idempotency-Key: $(uuidgen)" -H "X-Admission-Token: <admission_token>" \
   -d '{"event_id":1,"seat_ids":["VIP-A-12","VIP-A-13"]}'
 # Mở payment_url trong trình duyệt và bấm "Thanh toán thành công", rồi:
-curl -s localhost:8080/v1/orders/<order_id>/tickets -H "Authorization: Bearer $TOKEN"
+curl -s localhost:8000/v1/orders/<order_id>/tickets -H "Authorization: Bearer $TOKEN"
 ```
 
 Các chế độ gây lỗi của fakepay (`FAKEPAY_DELAY_MS_*`, `FAKEPAY_DUPLICATE_RATE`, `FAKEPAY_LATE_RATE`, `FAKEPAY_5XX_RATE`) được liệt kê trong `.env.example`. Mặc định có 5% webhook đến trễ 11 phút; đặt `FAKEPAY_LATE_RATE=0` khi thử bằng tay.
@@ -138,7 +156,9 @@ Các chế độ gây lỗi của fakepay (`FAKEPAY_DELAY_MS_*`, `FAKEPAY_DUPLIC
 
 | Dịch vụ | Địa chỉ |
 |---|---|
+| Frontend và API qua nginx | http://localhost:8000 |
 | Booking API | http://localhost:8080 |
+| Phòng chờ | http://localhost:8081 |
 | Fakepay | http://localhost:8090 |
 | PostgreSQL | `localhost:5432` (user/pass/db: `ticketrush`) |
 | Redis | `localhost:6379` |
@@ -198,7 +218,7 @@ make load-hold                           # BUYER_MODE=vu để thử chế độ
 | M2 | Giữ ghế bằng Redis Lua | Xong |
 | M3 | Expiry worker và outbox | Xong |
 | M4 | Fakepay, webhook, saga | Xong |
-| M5 | Phòng chờ ảo, frontend | Chưa làm |
+| M5 | Phòng chờ ảo, frontend | Xong |
 | M6 | Quan sát hệ thống | Chưa làm |
 | M7 | Test tải, kiểm tra bất biến | Chưa làm |
 | M8 | Chaos testing | Chưa làm |
@@ -206,7 +226,8 @@ make load-hold                           # BUYER_MODE=vu để thử chế độ
 
 ## Hạn chế đã biết
 
-- Booking từ chối chạy với `REQUIRE_ADMISSION=true` cho đến khi có phòng chờ (M5).
+- Mỗi kết nối SSE của phòng chờ hỏi Redis 2 giây một lần; chưa đo chi phí với hàng chục nghìn người chờ.
+- Người được cho vào mà không mua làm phí một lượt cho tới khi token hết hạn (5 phút).
 - API tạo đơn cần Redis cho khoá idempotency, kể cả khi `INVENTORY_BACKEND=pg`. Redis không trả lời thì trả `503` ([ADR-005](docs/adr/005-idempotency-key.md)).
 - Chưa có reconcile (M8).
   - Redis trong compose không có volume, nên `make down` rồi `make up` là mất dữ liệu Redis. Ghế đang giữ, và cả ghế **đã bán**, sẽ hiện là trống dù PostgreSQL vẫn có đơn `HELD` hoặc vé.

@@ -295,6 +295,24 @@ Thời gian đo tính cả lúc relay khởi động (kết nối, kiểm tra to
 
 Dữ liệu thô: [`docs/results/2026-09-25-m3-relay/`](results/2026-09-25-m3-relay/).
 
+## Phòng chờ: một lượt cấp token (M5)
+
+2026-11-04, commit `3852f07`, MacBook Apple M5 Pro 24 GiB; Redis 7.4.11 trong container testcontainers (OrbStack, VM 15 CPU).
+
+Một lượt worker cấp token cho 200 người đầu hàng (đúng `ADMIT_BATCH` mặc định): đọc đầu hàng (`ZRANGE`), đọc chủ của các queue id (`HMGET`), ký 200 JWT, ghi `admitted:<qid>` (`SET NX`), xoá 200 người khỏi hàng. Phần thêm người vào hàng trước mỗi vòng không tính giờ.
+
+```
+go test -tags=integration -run '^$' -bench Admit -benchtime=100x -count=5 ./internal/queue
+```
+
+| | Trung vị | Min | Max |
+|---|---|---|---|
+| Thời gian một lượt cấp 200 token | 1,448 ms | 1,439 ms | 1,476 ms |
+
+5 lần, mỗi lần 100 vòng. Với `ADMIT_INTERVAL = 1s`, worker chỉ dùng chưa tới 0,15% chu kỳ; nó không giới hạn `ADMIT_BATCH` ([ADR-004](adr/004-cach-chon-admit-batch.md)).
+
+Chưa đo: tải của booking khi người mua đi qua phòng chờ (`full_flow.js`, M7), và chi phí của hàng chục nghìn kết nối SSE.
+
 ## Tìm và sửa điểm nghẽn
 
 Chưa đo (M7).
